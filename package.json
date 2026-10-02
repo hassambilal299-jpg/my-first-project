@@ -1,0 +1,40 @@
+{
+  "name": "sitegrade",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "node --import tsx test/audit.test.mjs && node --import tsx test/diff.test.mjs && node --import tsx test/monitor.test.mjs && node --import tsx test/plans.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:diff": "node --import tsx test/diff.test.mjs",
+    "test:monitor": "node --import tsx test/monitor.test.mjs",
+    "test:flow": "node --import tsx test/flow.test.mjs",
+    "audit:ui": "node tools/audit-ui.mjs"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.7",
+    "bcryptjs": "^3.0.3",
+    "cheerio": "^1.0.0",
+    "drizzle-orm": "^0.45.3",
+    "jose": "^6.2.12",
+    "next": "16.3.7",
+    "postgres": "^3.4.9",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "drizzle-kit": "^0.31.11",
+    "playwright": "^1.63.0",
+    "tailwindcss": "^4.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.3"
+  }
+}

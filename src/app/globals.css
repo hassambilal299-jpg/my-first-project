@@ -1,0 +1,53 @@
+/**
+ * The webfont is loaded with a <link> in the document head, not with an
+ * @import here.
+ *
+ * An @import inside a stylesheet serialises the work: the browser has to
+ * fetch and parse this file before it can even discover the font URL, so the
+ * two requests queue instead of overlapping. A product that grades other
+ * sites on load speed should not ship that.
+ */
+@import "tailwindcss";
+
+@theme {
+  /* The fallback matters: with font-display: swap the first paint uses it,
+     so it needs to be a real stack rather than generic sans-serif. */
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  --color-brand-50:  #eef2ff;
+  --color-brand-100: #e0e7ff;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+  --color-brand-700: #4338ca;
+
+  --color-ink:       #0f172a;
+  --color-ink-muted: #475569;
+  --color-canvas:    #f8fafc;
+  --color-line:      #e2e8f0;
+
+  --color-critical:  #dc2626;
+  --color-warning:   #d97706;
+  --color-good:      #16a34a;
+}
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand-600);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
