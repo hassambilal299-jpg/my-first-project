@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { desc, eq, isNull, and, count } from "drizzle-orm";
+import { desc, eq, isNull, and, count, inArray } from "drizzle-orm";
 import { Gauge, Plus, Warning } from "@phosphor-icons/react/dist/ssr";
 import { db } from "@/lib/db";
 import { alerts, sites } from "@/lib/schema";
@@ -12,6 +12,9 @@ import { limitsFor, sitesRemaining } from "@/lib/plans";
 
 export const dynamic = "force-dynamic";
 
+/** addSite runs a first audit inline, which can take the fetch timeout. */
+export const maxDuration = 60;
+
 export default async function DashboardPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
@@ -22,11 +25,24 @@ export default async function DashboardPage() {
   });
 
   // One query for all unread counts rather than one per site.
+  // Restricted to this user's sites. Without the inArray the aggregate
+  // grouped every unread alert in the database and shipped a row per site
+  // across all accounts — not a leak, since only this user's ids are ever
+  // looked up below, but a query that got slower for everyone each time
+  // anyone signed up.
   const unreadRows = watched.length
     ? await db
         .select({ siteId: alerts.siteId, n: count() })
         .from(alerts)
-        .where(isNull(alerts.readAt))
+        .where(
+          and(
+            isNull(alerts.readAt),
+            inArray(
+              alerts.siteId,
+              watched.map((s) => s.id),
+            ),
+          ),
+        )
         .groupBy(alerts.siteId)
     : [];
   const unread = new Map(unreadRows.map((r) => [r.siteId, Number(r.n)]));

@@ -10,7 +10,14 @@ import { alerts, createId, sites, users } from "@/lib/schema";
 import { createSession, destroySession, getUserId } from "@/lib/auth";
 import { normalizeUrl } from "@/lib/audit";
 import { runCheck } from "@/lib/monitor";
-import { addSiteError, allowedFrequency, canShareReports } from "@/lib/plans";
+import { addSiteError, allowedFrequency, canShareReports, limitsFor } from "@/lib/plans";
+import {
+  clientKey,
+  loginLimitMessage,
+  signupLimitMessage,
+  takeLoginSlot,
+  takeSignupSlot,
+} from "@/lib/rate-limit";
 
 export type FormState = { error?: string; success?: string };
 
@@ -18,6 +25,14 @@ const credentials = z.object({
   email: z.string().email("Enter a valid email address"),
   password: z.string().min(8, "Password must be at least 8 characters"),
 });
+
+/**
+ * A real bcrypt hash of a value nobody knows, compared against when the email
+ * doesn't exist so that login takes the same time either way. Cost 12, to
+ * match what signup produces.
+ */
+const DUMMY_HASH =
+  "$2b$12$CIl0ovKYxO11tPYgqDOtguKUWNf/ll4RoAFvXbzq1diFZN5Y9Hx2u";
 
 /* ------------------------------------------------------------------ */
 /* Accounts                                                            */
@@ -33,10 +48,22 @@ export async function signup(
   });
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
+  // Capped per address: signup creates an account AND runs an audit of
+  // whatever URL is handed to it, so without this a script gets unlimited
+  // accounts and unlimited server-side fetches of any site it names.
+  const slot = await takeSignupSlot(await clientKey());
+  if (!slot.ok) return { error: signupLimitMessage(slot) };
+
   const email = parsed.data.email.toLowerCase();
 
   if (await db.query.users.findFirst({ where: eq(users.email, email) })) {
-    return { error: "An account with that email already exists." };
+    // Deliberately vague. Saying "that email is already registered" turns
+    // this form into a way to test whether any given address has an account
+    // here, which is worth knowing to someone with a stolen password list.
+    return {
+      error:
+        "We couldn't create that account. If you already have one, log in instead — or reset the password from the login page.",
+    };
   }
 
   const [user] = await db
@@ -82,14 +109,28 @@ export async function login(
   });
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
+  const slot = await takeLoginSlot(await clientKey());
+  if (!slot.ok) return { error: loginLimitMessage(slot) };
+
   const user = await db.query.users.findFirst({
     where: eq(users.email, parsed.data.email.toLowerCase()),
   });
 
+  /**
+   * The comparison always runs, even when there is no such account.
+   *
+   * Writing this as `user && await bcrypt.compare(...)` short-circuits, so an
+   * unknown address comes back in about a millisecond while a real one costs
+   * a full cost-12 hash. That difference is easily measurable over the
+   * network and turns the login form into an account-enumeration oracle, no
+   * matter how carefully the message is worded.
+   */
+  const hash = user?.passwordHash ?? DUMMY_HASH;
+  const passwordMatches = await bcrypt.compare(parsed.data.password, hash);
+
   // Same message either way, so the form can't be used to discover which
   // addresses have accounts.
-  const ok = user && (await bcrypt.compare(parsed.data.password, user.passwordHash));
-  if (!ok || !user) return { error: "Email or password is incorrect." };
+  if (!user || !passwordMatches) return { error: "Email or password is incorrect." };
 
   await createSession(user.id);
   redirect("/dashboard");
@@ -162,7 +203,11 @@ export async function deleteAccount(
 
   await db.delete(users).where(eq(users.id, userId));
   await destroySession();
-  redirect("/?deleted=1");
+
+  // Its own page rather than a query parameter on the home page: the home
+  // page is static, so it cannot read one, and silently landing back on the
+  // marketing site leaves you wondering whether it actually worked.
+  redirect("/goodbye");
 }
 
 /* ------------------------------------------------------------------ */
@@ -181,36 +226,56 @@ export async function addSite(
     return { error: "That doesn't look like a website address." };
   }
 
-  const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
-  if (!user) return { error: "Not signed in." };
-
-  const existing = await db.query.sites.findFirst({
-    where: and(eq(sites.userId, userId), eq(sites.url, url)),
-  });
-  if (existing) return { error: "You're already watching that site." };
-
-  // Checked after the duplicate test, so re-adding a site they already watch
-  // reads as a duplicate rather than as a billing wall.
-  const [{ n }] = await db
-    .select({ n: count() })
-    .from(sites)
-    .where(eq(sites.userId, userId));
-
-  const limit = addSiteError(user.plan, Number(n));
-  if (limit) return { error: limit };
-
   const label =
     String(formData.get("label") ?? "").trim() ||
     new URL(url).hostname.replace(/^www\./, "");
 
-  const [site] = await db
-    .insert(sites)
-    .values({ userId, url, label, alertEmail: user.email })
-    .returning();
+  /**
+   * Counting and inserting happen in one transaction, with the user row
+   * locked.
+   *
+   * As two separate statements this was a free-sites bug: submit the form
+   * twice at once on the free plan and both requests read a count of 0, both
+   * passed the limit check, and both inserted. Scripted, the limit meant
+   * nothing at all.
+   */
+  const outcome = await db.transaction(async (tx) => {
+    const [user] = await tx
+      .select()
+      .from(users)
+      .where(eq(users.id, userId))
+      .for("update");
+    if (!user) return { error: "Not signed in." };
 
-  // Run the first check now so the dashboard isn't empty, and so there's a
-  // baseline for the next run to compare against.
-  await runCheck(site);
+    const existing = await tx.query.sites.findFirst({
+      where: and(eq(sites.userId, userId), eq(sites.url, url)),
+    });
+    // Checked before the limit, so re-adding a site they already watch reads
+    // as a duplicate rather than as a billing wall.
+    if (existing) return { error: "You're already watching that site." };
+
+    const [{ n }] = await tx
+      .select({ n: count() })
+      .from(sites)
+      .where(eq(sites.userId, userId));
+
+    const limit = addSiteError(user.plan, Number(n));
+    if (limit) return { error: limit };
+
+    const [site] = await tx
+      .insert(sites)
+      .values({ userId, url, label, alertEmail: user.email })
+      .returning();
+
+    return { site, plan: user.plan };
+  });
+
+  if ("error" in outcome) return outcome;
+
+  // Deliberately outside the transaction: the audit is a network call that
+  // can take twenty seconds, and holding a row lock on the user for that
+  // long would block every one of their other requests.
+  await runCheck(outcome.site, outcome.plan);
 
   revalidatePath("/dashboard");
   return { success: `Now watching ${label}.` };

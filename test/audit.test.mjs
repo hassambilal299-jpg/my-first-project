@@ -148,6 +148,40 @@ routes.set("/loop2", redirect("/loop"));
 await new Promise((r) => server.listen(4020, r));
 const BASE = "http://localhost:4020";
 
+/**
+ * A TLS server with a certificate that expires in 9 days, so the expiry
+ * reader is tested against a real handshake rather than a mock. Generated
+ * on the fly — committing a certificate would mean committing a private key,
+ * and it would expire.
+ */
+const { createServer: createTlsServer } = await import("https");
+const { execFileSync } = await import("child_process");
+const { mkdtempSync, readFileSync } = await import("fs");
+const { tmpdir } = await import("os");
+const { join } = await import("path");
+
+let tlsServer = null;
+try {
+  const dir = mkdtempSync(join(tmpdir(), "sitegrade-cert-"));
+  execFileSync("openssl", [
+    "req", "-x509", "-newkey", "rsa:2048",
+    "-keyout", join(dir, "key.pem"),
+    "-out", join(dir, "cert.pem"),
+    "-days", "9", "-nodes",
+    "-subj", "/CN=localhost/O=Sitegrade Test",
+  ], { stdio: "ignore" });
+
+  tlsServer = createTlsServer(
+    { key: readFileSync(join(dir, "key.pem")), cert: readFileSync(join(dir, "cert.pem")) },
+    (_req, res) => { res.writeHead(200); res.end("ok"); },
+  );
+  await new Promise((r) => tlsServer.listen(4443, r));
+} catch {
+  // openssl missing: the certificate tests below report it rather than
+  // failing the suite for an unrelated reason.
+  tlsServer = null;
+}
+
 /** The auditor blocks localhost on purpose, so tests call the parts directly. */
 async function audit(path) {
   const page = await fetchPage(`${BASE}${path}`, { allowPrivate: ["localhost"] });
@@ -185,6 +219,25 @@ console.log("\nPrivate address ranges are refused");
     "224.0.0.1", "255.255.255.255",
     "::1", "::", "fc00::1", "fd12:3456::1", "fe80::1",
     "::ffff:127.0.0.1", "::ffff:169.254.169.254",
+
+    // The hex spellings of those same IPv4-mapped addresses. These matter
+    // more than the dotted ones: the URL parser REWRITES "::ffff:127.0.0.1"
+    // into "::ffff:7f00:1", so the dotted form is what a human types and the
+    // hex form is what actually reaches the guard. Matching only the dotted
+    // text was a real hole — a public page could redirect to the hex form
+    // and reach loopback or the cloud metadata service.
+    "::ffff:7f00:1", "::ffff:a9fe:a9fe", "::ffff:c0a8:1",
+    "0:0:0:0:0:ffff:7f00:1", "[::ffff:7f00:1]",
+
+    // NAT64 embeds an IPv4 address too.
+    "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe",
+
+    // 6to4 carries an IPv4 address in the next two groups, inside the
+    // otherwise-allowed global unicast range.
+    "2002:7f00:1::", "2002:a9fe:a9fe::", "2002::1",
+
+    // Not globally routable, so denied by default.
+    "ff02::1", "100::1", "::2",
   ];
   for (const ip of blocked) {
     check(`${ip} is private`, isPrivateIp(ip) === true);
@@ -194,6 +247,10 @@ console.log("\nPrivate address ranges are refused");
   const allowed = [
     "8.8.8.8", "1.1.1.1", "93.184.216.34", "172.15.0.1", "172.32.0.1",
     "11.0.0.1", "192.167.1.1", "100.63.0.1", "100.128.0.1", "2606:4700::1",
+    // Real public IPv6, which must keep working or IPv6-only sites can't be
+    // audited at all.
+    "2606:4700:4700::1111", "2001:4860:4860::8888", "2a00:1450:4001::2004",
+    "3ffe::1",
   ];
   for (const ip of allowed) {
     check(`${ip} is public`, isPrivateIp(ip) === false);
@@ -322,6 +379,76 @@ console.log("\nBroken site");
   check("scores near zero", score <= 60, `scored ${score}`);
 }
 
+console.log("\nSSL certificate expiry");
+{
+  // Driven through runChecks with synthetic page data, so every branch is
+  // exercised without waiting on a real certificate to approach its expiry.
+  const https = (certDaysLeft) => ({
+    url: "https://x.test/",
+    finalUrl: "https://x.test/",
+    status: 200,
+    html: GOOD_SITE,
+    loadMs: 200,
+    htmlBytes: 900,
+    headers: { "content-encoding": "gzip" },
+    certDaysLeft,
+  });
+
+  const expiry = (days) => find(runChecks(https(days)), "ssl-expiry");
+
+  check("a healthy certificate passes", expiry(200)?.severity === "pass", expiry(200)?.severity);
+  check("30 days out is still a pass", expiry(30)?.severity === "pass");
+  check("21 days out is a warning", expiry(21)?.severity === "warning", expiry(21)?.severity);
+  check("7 days out is critical", expiry(7)?.severity === "critical", expiry(7)?.severity);
+  check("the remaining days are named", /7 days/.test(expiry(7)?.title ?? ""), expiry(7)?.title);
+  check("1 day is singular", /\b1 day\b/.test(expiry(1)?.title ?? ""), expiry(1)?.title);
+  check("an expired certificate is critical", expiry(-3)?.severity === "critical");
+  check("an expired certificate says so", /expired/i.test(expiry(-3)?.title ?? ""), expiry(-3)?.title);
+  check("expiry never says 'expires in -3 days'", !/-\d/.test(expiry(-3)?.title ?? ""));
+
+  // An unreadable certificate must be silent, not reassuring.
+  const unknown = runChecks(https(undefined));
+  check("an unknown certificate produces no expiry finding", !find(unknown, "ssl-expiry"));
+  check("but SSL itself still passes", has(unknown, "ssl", "pass"));
+
+  // http has no certificate to expire, so only the "no SSL" finding fires.
+  const plain = runChecks({ ...https(undefined), finalUrl: "http://x.test/" });
+  check("an http site reports no SSL", has(plain, "ssl", "critical"));
+  check("an http site has no expiry finding", !find(plain, "ssl-expiry"));
+}
+
+console.log("\nReading a real certificate");
+if (!tlsServer) {
+  console.log("  SKIP  openssl unavailable, cannot issue a test certificate");
+} else {
+  const { readCertificate } = await import("../src/lib/tls.ts");
+  const cert = await readCertificate("localhost", 4443);
+
+  check("the certificate is readable", cert !== null);
+  // The fixture certificate is issued for 9 days, so 8 after a moment's rounding.
+  check(
+    "the expiry is within a day of what was issued",
+    cert !== null && Math.abs(cert.daysLeft - 8) <= 1,
+    String(cert?.daysLeft),
+  );
+  check("the issuer comes back", cert?.issuer === "Sitegrade Test", cert?.issuer);
+
+  const none = await readCertificate("localhost", 4044);
+  check("a port with nothing on it returns null, not a throw", none === null);
+}
+
+console.log("\nAn http-only site is up, not down");
+{
+  // https refuses on 4044 (nothing listening); http answers on 4020.
+  const page = await fetchPage("https://localhost:4020/good", { allowPrivate: true });
+  const findings = runChecks(page);
+
+  check("it fell back to http", page.finalUrl.startsWith("http://"), page.finalUrl);
+  check("it is not reported as unreachable", !has(findings, "reachable"), page.error ?? "");
+  check("the real problem is reported instead", has(findings, "ssl", "critical"));
+  check("the page content was still read", findings.length > 1);
+}
+
 console.log("\nUnreachable domain");
 {
   const page = await fetchPage("http://localhost:4021/nothing-here", { allowPrivate: ["localhost"] });
@@ -333,4 +460,5 @@ console.log("\nUnreachable domain");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 server.close();
+tlsServer?.close();
 process.exit(failed === 0 ? 0 : 1);

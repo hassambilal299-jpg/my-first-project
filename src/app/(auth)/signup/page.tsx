@@ -30,7 +30,8 @@ function SignupForm() {
     <div className="rounded-xl border border-line bg-white p-6">
       <h1 className="text-xl font-bold">Start watching your site</h1>
       <p className="mt-1 text-sm text-ink-muted">
-        We check it automatically and email you the day something breaks.
+        We check it automatically and flag the day something breaks. Free for
+        one site — emailed alerts come with the paid plans.
       </p>
 
       <form action={formAction} className="mt-5 space-y-4">

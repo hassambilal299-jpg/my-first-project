@@ -1,28 +1,13 @@
 "use server";
 
-import { headers } from "next/headers";
 import { auditSite, normalizeUrl, type AuditResult } from "@/lib/audit";
-import { rateLimitMessage, takeAuditSlot } from "@/lib/rate-limit";
+import { clientKey, rateLimitMessage, takeAuditSlot } from "@/lib/rate-limit";
+import { getUserId } from "@/lib/auth";
 
 export type AuditState = {
   result?: AuditResult;
   error?: string;
 };
-
-/**
- * Best guess at who is calling, for rate limiting only.
- *
- * On Vercel the real client address is the first entry in x-forwarded-for;
- * the socket address is the proxy's and identical for everyone. An empty
- * string means we could not tell, and the limiter lets those through rather
- * than putting every unidentified visitor in one shared bucket.
- */
-async function clientKey(): Promise<string> {
-  const h = await headers();
-  const forwarded = h.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0].trim();
-  return h.get("x-real-ip")?.trim() ?? "";
-}
 
 /**
  * Run an audit for the URL typed into the form.
@@ -44,9 +29,26 @@ export async function runAudit(
     };
   }
 
-  // Checked after parsing, so a typo doesn't burn one of their audits.
-  const slot = await takeAuditSlot(await clientKey());
-  if (!slot.ok) return { error: rateLimitMessage(slot) };
+  /**
+   * Signed-in visitors aren't capped. The cap exists to stop an anonymous
+   * script using us to hammer other people's websites; someone with an
+   * account is identifiable and can be suspended, which is a better control
+   * than a counter. It also makes the free plan's "unlimited one-off audits"
+   * true, and gives the refusal message somewhere real to send people.
+   *
+   * Checked after parsing, so a typo never burns one of their audits.
+   */
+  let signedIn = false;
+  try {
+    signedIn = Boolean(await getUserId());
+  } catch {
+    signedIn = false;
+  }
+
+  if (!signedIn) {
+    const slot = await takeAuditSlot(await clientKey());
+    if (!slot.ok) return { error: rateLimitMessage(slot) };
+  }
 
   try {
     return { result: await auditSite(url) };

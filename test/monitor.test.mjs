@@ -206,7 +206,9 @@ console.log("\nScheduling");
   check("a paused site is skipped", !due.some((s) => s.id === site.id));
   await db.update(sites).set({ paused: false }).where(eq(sites.id, site.id));
 
-  // Daily cadence.
+  // Daily cadence — only on a plan that includes it, so the owner is moved
+  // to Pro first.
+  await db.update(users).set({ plan: "PRO" }).where(eq(users.id, user.id));
   await db
     .update(sites)
     .set({ frequency: "DAILY", lastCheckedAt: new Date(Date.now() - 2 * 3600 * 1000) })
@@ -220,6 +222,38 @@ console.log("\nScheduling");
     .where(eq(sites.id, site.id));
   due = await dueSites();
   check("a daily site checked 25 hours ago is due", due.some((s) => s.id === site.id));
+
+  /**
+   * The scheduler has to honour the plan, not just the stored setting.
+   *
+   * Previously allowedFrequency was applied only when someone edited the
+   * frequency, so a customer who stopped paying kept every site on daily
+   * for ever — the exact opposite of what the FAQ promises, and at our cost.
+   */
+  await db.update(users).set({ plan: "FREE" }).where(eq(users.id, user.id));
+  due = await dueSites();
+  check(
+    "a downgraded account's daily site falls back to weekly",
+    !due.some((s) => s.id === site.id),
+  );
+
+  await db
+    .update(sites)
+    .set({ lastCheckedAt: new Date(Date.now() - 8 * 24 * 3600 * 1000) })
+    .where(eq(sites.id, site.id));
+  due = await dueSites();
+  check("but it is still checked on the weekly schedule", due.some((s) => s.id === site.id));
+
+  // Longest-waiting first, so a run that hits its time budget can't starve
+  // the same sites every day.
+  const times = due.map((s) => s.lastCheckedAt?.getTime() ?? 0);
+  check(
+    "due sites come back oldest first",
+    times.every((t, i) => i === 0 || times[i - 1] <= t),
+    times.join(","),
+  );
+
+  await db.update(users).set({ plan: "PRO" }).where(eq(users.id, user.id));
 }
 
 console.log("\nAn unreachable site doesn't crash the run");

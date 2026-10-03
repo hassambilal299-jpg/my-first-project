@@ -4,35 +4,23 @@ import { ArrowRight } from "@phosphor-icons/react/dist/ssr";
 import { MarketingHeader, SiteFooter } from "@/components/site-chrome";
 import { PricingTable } from "@/components/pricing-table";
 import { Faq, PRICING_FAQ } from "@/components/faq";
-import { getCurrentUser } from "@/lib/auth";
-import { asPlan } from "@/lib/plans";
 import { CHECK_COUNT } from "@/lib/checks";
 
 export const metadata: Metadata = {
-  title: "Pricing — Sitegrade",
+  title: "Pricing",
   description:
     "One site free forever, no card. Pro is $19/month for 10 sites with daily checks and email alerts. Agency watches 50.",
 };
 
-export const dynamic = "force-dynamic";
-
-export default async function PricingPage() {
-  // A missing database must not take down a marketing page.
-  let plan;
-  let signedIn = false;
-  try {
-    const user = await getCurrentUser();
-    if (user) {
-      signedIn = true;
-      plan = asPlan(user.plan);
-    }
-  } catch {
-    signedIn = false;
-  }
-
+/**
+ * Static, for the same reason as the home page: it is a page we want indexed
+ * and served instantly. Which plan the visitor is already on is shown on the
+ * account page, next to their actual usage, where it is more use anyway.
+ */
+export default function PricingPage() {
   return (
     <div className="min-h-dvh">
-      <MarketingHeader signedIn={signedIn} />
+      <MarketingHeader />
 
       <main className="px-4 pt-14 pb-10 sm:pt-20">
         <div className="mx-auto max-w-2xl text-center">
@@ -47,7 +35,7 @@ export default async function PricingPage() {
         </div>
 
         <div className="mx-auto mt-12 max-w-5xl">
-          <PricingTable currentPlan={plan} />
+          <PricingTable />
         </div>
 
         {/* Honest about how payment works today. A fake checkout that

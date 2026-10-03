@@ -11,6 +11,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import postgres from "postgres";
+import { requireSecret } from "@/lib/admin-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -124,17 +125,9 @@ const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS "alerts_site_created_idx" ON "alerts" USING btree ("site_id","created_at")`,
 ];
 
-export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) {
-    return NextResponse.json({ error: "CRON_SECRET is not set" }, { status: 500 });
-  }
-
-  const header = req.headers.get("authorization");
-  const query = req.nextUrl.searchParams.get("secret");
-  if (header !== `Bearer ${secret}` && query !== secret) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+export async function POST(req: NextRequest) {
+  const guard = requireSecret(req, "admin");
+  if (!guard.ok) return guard.response;
 
   const url = process.env.DATABASE_URL;
   if (!url) {

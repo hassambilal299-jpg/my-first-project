@@ -73,6 +73,19 @@ try {
     check("the free limit is stated", /0 of 1 used/.test(body), body.match(/\d of \d used/)?.[0]);
   }
 
+  /* -- the auth pages must not dead-end a signed-in visitor ---------- */
+  console.log("\nAlready signed in");
+  {
+    // This is what lets the home page and pricing page stay static: they no
+    // longer read the session to decide the header, so these redirects are
+    // the only thing getting a returning visitor to the right place.
+    await page.goto(`${BASE}/login`, { waitUntil: "domcontentloaded" });
+    check("visiting /login redirects to the dashboard", page.url().includes("/dashboard"), page.url());
+
+    await page.goto(`${BASE}/signup`, { waitUntil: "domcontentloaded" });
+    check("visiting /signup redirects to the dashboard", page.url().includes("/dashboard"), page.url());
+  }
+
   /* -- adding the one site free allows ------------------------------- */
   console.log("\nAdding a site on the free plan");
   {
@@ -245,7 +258,11 @@ try {
 
     await page.fill('input[name="confirm"]', "DELETE");
     await delForm.locator('button[type="submit"]').click();
-    await page.waitForURL(/\/\?deleted=1|\/$/, { timeout: 30_000 });
+    await page.waitForURL(/\/goodbye$/, { timeout: 30_000 });
+    check(
+      "the deletion is confirmed on screen",
+      /deleted/i.test(await page.locator("h1").first().innerText()),
+    );
 
     const gone = await db.query.users.findFirst({ where: eq(users.email, EMAIL) });
     check("the account is gone", !gone);

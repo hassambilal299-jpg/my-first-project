@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Clause, LegalPage } from "@/components/legal";
 
 export const metadata: Metadata = {
-  title: "Terms of service — Sitegrade",
+  title: "Terms of service",
   description: "The terms you agree to when you use Sitegrade.",
 };
 

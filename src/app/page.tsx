@@ -19,27 +19,37 @@ import { MarketingHeader, SiteFooter } from "@/components/site-chrome";
 import { Faq, GENERAL_FAQ } from "@/components/faq";
 import { CHECK_COUNT, CHECK_REGISTRY } from "@/lib/checks";
 import { PLANS, annualSavingPct } from "@/lib/plans";
-import { getUserId } from "@/lib/auth";
 
 export const metadata: Metadata = {
-  title: "Sitegrade — know the day a website breaks",
+  // `absolute` so the root layout's "%s — Sitegrade" template doesn't append
+  // a second "— Sitegrade" to a title that already ends in it.
+  title: { absolute: "Sitegrade — know the day a website breaks" },
   description: `Run a free ${CHECK_COUNT}-point check on any website in seconds, then let Sitegrade watch it and email you the day something breaks.`,
 };
 
-export default async function HomePage() {
-  // The header shows "Dashboard" instead of "Log in" for a returning visitor.
-  // Wrapped because a missing database must not take down the home page —
-  // the free audit is the one thing that has to keep working.
-  let signedIn = false;
-  try {
-    signedIn = Boolean(await getUserId());
-  } catch {
-    signedIn = false;
-  }
+/**
+ * Deliberately a static page: it reads no cookies and touches no database,
+ * so it is prerendered once and served from the edge.
+ *
+ * An earlier version read the session here to show "Dashboard" instead of
+ * "Log in" in the header. That one nav link turned the busiest, most
+ * SEO-sensitive page in the product into a per-request server render. The
+ * signed-in case is handled instead by /login and /signup redirecting
+ * straight to the dashboard, which gets a returning visitor to the same
+ * place in one hop.
+ */
+/**
+ * The free audit runs as a server action from this page, and an audit can
+ * take the full 20-second fetch timeout. Route segment config applies to the
+ * actions a page invokes, so the limit belongs here rather than in the
+ * "use server" file, which may only export async functions.
+ */
+export const maxDuration = 60;
 
+export default function HomePage() {
   return (
     <div className="min-h-dvh">
-      <MarketingHeader signedIn={signedIn} />
+      <MarketingHeader />
 
       {/* ---------------- hero ---------------- */}
       <section className="px-4 pt-14 pb-4 sm:pt-20">

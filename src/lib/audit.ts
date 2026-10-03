@@ -5,6 +5,7 @@
  * HTML without any network at all.
  */
 import { runChecks, scoreOf, gradeOf, type Finding, type PageData } from "@/lib/checks";
+import { readCertificate } from "@/lib/tls";
 
 /** Long enough for a genuinely slow site, short enough not to hang the UI. */
 const TIMEOUT_MS = 20_000;
@@ -98,10 +99,6 @@ export function isPrivateHostname(hostname: string): boolean {
 export function isPrivateIp(value: string): boolean {
   const ip = value.toLowerCase().replace(/^\[|\]$/g, "");
 
-  // IPv4-mapped IPv6 (::ffff:127.0.0.1) unwraps to the IPv4 rules below.
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
-  if (mapped) return isPrivateIp(mapped[1]);
-
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
   if (v4) {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
@@ -118,10 +115,88 @@ export function isPrivateIp(value: string): boolean {
     return false;
   }
 
-  if (ip === "::" || ip === "::1") return true;       // unspecified, loopback
-  if (/^f[cd]/.test(ip)) return true;                 // fc00::/7 unique local
-  if (/^fe[89ab]/.test(ip)) return true;              // fe80::/10 link-local
-  return false;
+  const v6 = expandIpv6(ip);
+  if (!v6) return false; // not an IP literal at all — an ordinary hostname
+
+  /**
+   * IPv4-mapped (::ffff:0:0/96) and IPv4-compatible (::/96) addresses are
+   * really IPv4 addresses, so they are judged by the embedded one.
+   *
+   * Matching this on the text used to be the bug: `::ffff:127.0.0.1` was
+   * caught, but the WHATWG URL parser rewrites that exact address to
+   * `::ffff:7f00:1`, which sailed straight through to loopback. Comparing
+   * the expanded numbers instead means both spellings land on the same rule.
+   */
+  const quadFrom = (hi: number, lo: number) =>
+    [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join(".");
+
+  const embedsIpv4 =
+    (v6.slice(0, 5).every((x) => x === 0) && (v6[5] === 0xffff || v6[5] === 0)) ||
+    // 64:ff9b::/96, the well-known NAT64 prefix, embeds one too.
+    (v6[0] === 0x64 && v6[1] === 0xff9b && v6.slice(2, 6).every((x) => x === 0));
+
+  if (embedsIpv4) return isPrivateIp(quadFrom(v6[6], v6[7]));
+
+  /**
+   * 6to4 (2002::/16) carries its IPv4 address in the next two groups, so
+   * 2002:7f00:1:: is loopback wearing a hat. It sits inside the global
+   * unicast range below, so without this it would be waved through.
+   */
+  if (v6[0] === 0x2002) return isPrivateIp(quadFrom(v6[1], v6[2]));
+
+  /**
+   * Everything else is DENIED unless it is global unicast.
+   *
+   * 2000::/3 is the only range currently allocated for globally routable
+   * unicast, so an address outside it is loopback, link-local, unique-local,
+   * multicast, or something not yet defined — none of which a customer's
+   * website is ever served from. Default-deny is the right way round here:
+   * a new reserved range should fail closed, not become a fresh hole.
+   */
+  return !(v6[0] >= 0x2000 && v6[0] <= 0x3fff);
+}
+
+/**
+ * Expands an IPv6 literal to its eight 16-bit groups, or null if the text
+ * isn't one. Handles `::` compression and a trailing dotted-quad.
+ */
+function expandIpv6(input: string): number[] | null {
+  if (!input.includes(":")) return null;
+
+  let text = input;
+
+  // A trailing IPv4 part (…:1.2.3.4) becomes the two hex groups it stands for.
+  const dotted = /:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted) {
+    const octets = dotted.slice(1, 5).map(Number);
+    if (octets.some((n) => n > 255)) return null;
+    const hex = [
+      ((octets[0] << 8) | octets[1]).toString(16),
+      ((octets[2] << 8) | octets[3]).toString(16),
+    ].join(":");
+    text = `${text.slice(0, dotted.index)}:${hex}`;
+  }
+
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+
+  let groups: string[];
+  if (halves.length === 2) {
+    const gap = 8 - head.length - tail.length;
+    if (gap < 0) return null;
+    groups = [...head, ...Array<string>(gap).fill("0"), ...tail];
+  } else {
+    groups = head;
+  }
+  if (groups.length !== 8) return null;
+
+  const numbers = groups.map((g) =>
+    /^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN,
+  );
+  return numbers.some(Number.isNaN) ? null : numbers;
 }
 
 /**
@@ -251,18 +326,53 @@ export async function fetchPage(
     const headers: Record<string, string> = {};
     res.headers.forEach((v, k) => (headers[k.toLowerCase()] = v));
 
+    const finalUrl = current || res.url || url;
+
+    // Read after the page, not instead of it, so a certificate probe that
+    // hangs can never stop the audit producing a report.
+    let certDaysLeft: number | undefined;
+    if (finalUrl.startsWith("https://")) {
+      const target = new URL(finalUrl);
+      const cert = await readCertificate(
+        target.hostname.replace(/^\[|\]$/g, ""),
+        target.port ? Number(target.port) : 443,
+      );
+      if (cert) certDaysLeft = cert.daysLeft;
+    }
+
     return {
       url,
       // `current` is where we actually ended up after following the chain
       // ourselves; res.url is empty on a manual-redirect response.
-      finalUrl: current || res.url || url,
+      finalUrl,
       status: res.status,
       html,
       loadMs,
       htmlBytes: buffer.byteLength,
       headers,
+      certDaysLeft,
     };
   } catch (err) {
+    /**
+     * A bare domain gets https:// put in front of it, so a small business
+     * still serving only port 80 failed here with ECONNREFUSED — and was
+     * then reported as DOWN, which emailed its owner to say their working
+     * website was offline. It is the worst kind of false alarm: it trains
+     * people to ignore the alerts.
+     *
+     * So before giving up on an https connection failure, try plain http
+     * once. If that answers, the site is up and the real finding is that it
+     * has no SSL at all, which trustChecks reports from the http finalUrl.
+     */
+    if (canRetryOverHttp(url, err)) {
+      const overHttp = await fetchPage(url.replace(/^https:/i, "http:"), {
+        allowPrivate,
+      });
+      if (!overHttp.error) {
+        return { ...overHttp, url, httpsUnavailable: true };
+      }
+    }
+
     return {
       url,
       finalUrl: url,
@@ -274,6 +384,28 @@ export async function fetchPage(
       error: describeFetchError(err),
     };
   }
+}
+
+/**
+ * Only for connection-level https failures. A 500, a timeout on a site that
+ * did answer, or our own private-address refusal must not be retried — the
+ * first two aren't about SSL, and retrying the third would walk straight
+ * around the SSRF guard.
+ */
+function canRetryOverHttp(url: string, err: unknown): boolean {
+  if (!/^https:/i.test(url)) return false;
+
+  const text = describeFetchError(err).toLowerCase();
+  if (text.includes("private")) return false;
+
+  return (
+    text.includes("refused") ||
+    text.includes("ssl") ||
+    text.includes("certificate") ||
+    text.includes("tls") ||
+    text.includes("protocol") ||
+    text.includes("reset")
+  );
 }
 
 /** Turn a raw fetch error into something a business owner can act on. */

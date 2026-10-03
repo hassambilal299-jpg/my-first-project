@@ -3,7 +3,7 @@ import { Clause, LegalPage } from "@/components/legal";
 import { AUDITS_PER_HOUR } from "@/lib/rate-limit";
 
 export const metadata: Metadata = {
-  title: "Privacy policy — Sitegrade",
+  title: "Privacy policy",
   description: "What Sitegrade stores, why, and how to get rid of it.",
 };
 
@@ -92,7 +92,7 @@ export default function PrivacyPage() {
           Change your password or the address alerts go to from your account
           settings. Remove a site to delete its history. Delete your account to
           remove everything at once — it is immediate and it is not
-          recoverable, so export anything you want to keep first.
+          recoverable, so copy down anything you still want first.
         </p>
         <p>
           Depending on where you live you may also have the right to ask for a

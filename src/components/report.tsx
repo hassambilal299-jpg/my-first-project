@@ -52,9 +52,10 @@ export function Report({
       <section className="rounded-xl border border-brand-100 bg-brand-50 p-5 text-center sm:p-6">
         <h3 className="text-base font-bold text-ink">Want to know when this changes?</h3>
         <p className="mx-auto mt-1.5 max-w-md text-sm text-ink-muted">
-          We&apos;ll re-check this site automatically and email you the day
-          something breaks — the site going down, SSL expiring, speed getting
-          worse.
+          We&apos;ll re-check this site automatically and flag the day
+          something breaks — the site going down, the SSL certificate
+          expiring, speed getting worse. Free for one site; emailed alerts
+          are on the paid plans.
         </p>
         <Link
           href={`/signup?watch=${encodeURIComponent(result.url)}`}

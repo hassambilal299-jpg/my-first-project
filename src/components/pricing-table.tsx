@@ -123,9 +123,11 @@ function PlanCard({
       )}
 
       <h3 className="text-lg font-extrabold">{spec.name}</h3>
-      <p className="mt-1 text-sm text-ink-muted">{spec.blurb}</p>
+      {/* Fixed height so a blurb that wraps to two lines doesn't push this
+          card's price and button out of line with its neighbours. */}
+      <p className="mt-1 min-h-10 text-sm text-ink-muted">{spec.blurb}</p>
 
-      <p className="mt-5 flex items-baseline gap-1.5">
+      <p className="mt-4 flex items-baseline gap-1.5">
         <span className="text-4xl font-extrabold tabular-nums">${perMonth}</span>
         <span className="text-sm font-medium text-ink-muted">
           {free ? "forever" : "/month"}

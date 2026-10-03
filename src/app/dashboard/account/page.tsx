@@ -10,7 +10,7 @@ import { Card } from "@/components/ui";
 import { ChangePasswordForm, DeleteAccountForm } from "@/components/account-forms";
 import { PLANS, annualTotal, asPlan, limitsFor, sitesRemaining } from "@/lib/plans";
 
-export const metadata: Metadata = { title: "Your account — Sitegrade" };
+export const metadata: Metadata = { title: "Your account" };
 export const dynamic = "force-dynamic";
 
 export default async function AccountPage() {

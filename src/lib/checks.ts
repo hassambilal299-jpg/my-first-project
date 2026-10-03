@@ -39,7 +39,8 @@ export const CHECK_REGISTRY: Record<Finding["category"], string[]> = {
   ],
   Trust: [
     "Whether the site loads at all",
-    "A valid, in-date SSL certificate",
+    "A secure (SSL) connection",
+    "How long before the certificate expires",
   ],
   Google: [
     "The page title Google shows in results",
@@ -83,6 +84,20 @@ export type PageData = {
   headers: Record<string, string>;
   /** Set when the site could not be reached at all. */
   error?: string;
+
+  /**
+   * Whole days until the TLS certificate expires, negative once it has
+   * lapsed. Undefined when the site isn't https or the certificate couldn't
+   * be read — which must read as "unknown", never as "fine".
+   */
+  certDaysLeft?: number;
+
+  /**
+   * True when https refused the connection but plain http answered. The site
+   * is up; it simply has no SSL. Without this the audit reported a perfectly
+   * healthy http-only site as DOWN and emailed its owner to say so.
+   */
+  httpsUnavailable?: boolean;
 };
 
 /* ------------------------------------------------------------------ */
@@ -288,6 +303,10 @@ function mobileChecks($: cheerio.CheerioAPI): Finding[] {
 /* Trust                                                               */
 /* ------------------------------------------------------------------ */
 
+/** Start warning this far out — enough time to renew without a panic. */
+const CERT_WARN_DAYS = 21;
+const CERT_URGENT_DAYS = 7;
+
 function trustChecks(page: PageData): Finding[] {
   const out: Finding[] = [];
 
@@ -302,11 +321,64 @@ function trustChecks(page: PageData): Finding[] {
       fix: "Install an SSL certificate — most hosts give one free.",
       weight: 25,
     });
+    return out;
+  }
+
+  out.push(pass("ssl", "Trust", "Secure connection (SSL) is working"));
+
+  // Expiry is a separate finding from "is there SSL at all", because they
+  // need different wording and they break at different times. Undefined
+  // means we couldn't read the certificate, which is reported as nothing
+  // rather than guessed at.
+  const days = page.certDaysLeft;
+  if (days === undefined) return out;
+
+  if (days < 0) {
+    out.push({
+      id: "ssl-expiry",
+      category: "Trust",
+      severity: "critical",
+      title: `Your SSL certificate expired ${describeDays(-days)} ago`,
+      detail:
+        "Every browser now shows a full-page security warning instead of your site. Most visitors will turn back at that screen, and nothing on the site is reachable until it's renewed.",
+      fix: "Renew the certificate today. If your host issues them automatically, the renewal has failed and needs a look.",
+      weight: 30,
+    });
+  } else if (days <= CERT_URGENT_DAYS) {
+    out.push({
+      id: "ssl-expiry",
+      category: "Trust",
+      severity: "critical",
+      title: `Your SSL certificate expires in ${describeDays(days)}`,
+      detail:
+        "When it lapses, every browser shows a full-page security warning instead of your site — not a slow decline, an immediate stop.",
+      fix: "Renew it now, and check that automatic renewal is actually switched on.",
+      weight: 20,
+    });
+  } else if (days <= CERT_WARN_DAYS) {
+    out.push({
+      id: "ssl-expiry",
+      category: "Trust",
+      severity: "warning",
+      title: `Your SSL certificate expires in ${describeDays(days)}`,
+      detail:
+        "There's time to sort it out, but if it lapses every browser will show a security warning instead of your site.",
+      fix: "Renew it, or confirm automatic renewal is set up and working.",
+      weight: 5,
+    });
   } else {
-    out.push(pass("ssl", "Trust", "Secure connection (SSL) is working"));
+    out.push(
+      pass("ssl-expiry", "Trust", `SSL certificate is valid for another ${describeDays(days)}`),
+    );
   }
 
   return out;
+}
+
+function describeDays(days: number): string {
+  if (days <= 0) return "less than a day";
+  if (days === 1) return "1 day";
+  return `${days} days`;
 }
 
 /* ------------------------------------------------------------------ */

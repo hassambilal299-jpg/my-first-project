@@ -5,13 +5,13 @@
  * paths behave identically — a manual check is the same code as a scheduled
  * one, which is the only way to be confident the scheduled one works.
  */
-import { and, desc, eq } from "drizzle-orm";
+import { asc, desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { alerts, checks, sites, users, type Site } from "@/lib/schema";
 import { auditSite } from "@/lib/audit";
 import { diffSnapshots, emailSubject, worthEmailing, type Snapshot } from "@/lib/diff";
 import { sendAlertEmail } from "@/lib/email";
-import { canEmailAlerts } from "@/lib/plans";
+import { allowedFrequency, canEmailAlerts } from "@/lib/plans";
 
 export type CheckOutcome = {
   siteId: string;
@@ -154,21 +154,30 @@ export async function runCheck(
  * the unpaused ones and filtering is not worth optimising.
  */
 export async function dueSites(now = new Date()): Promise<Site[]> {
-  const all = await db.query.sites.findMany({ where: eq(sites.paused, false) });
+  // Joined to users so the owner's plan is known here. Without it a customer
+  // who downgrades keeps every site on daily for ever: allowedFrequency was
+  // only applied when someone edited the setting, so a stored DAILY survived
+  // the downgrade untouched. The FAQ promises daily drops back to weekly, so
+  // this is also the code that makes that sentence true.
+  const rows = await db
+    .select({ site: sites, plan: users.plan })
+    .from(sites)
+    .innerJoin(users, eq(sites.userId, users.id))
+    .where(eq(sites.paused, false))
+    // Longest-waiting first. A run that hits its time budget then truncates
+    // the freshest sites rather than starving the same unlucky tail every
+    // day — without an explicit order, Postgres returns a stable arbitrary
+    // order and the sites past the cutoff are never checked at all.
+    .orderBy(asc(sites.lastCheckedAt));
 
-  return all.filter((site) => {
-    if (!site.lastCheckedAt) return true; // never checked
-    const hours = (now.getTime() - site.lastCheckedAt.getTime()) / 3_600_000;
-    // A little under the nominal interval, so a cron that fires a few minutes
-    // early doesn't skip a site until the next day.
-    return site.frequency === "DAILY" ? hours >= 23 : hours >= 167;
-  });
-}
-
-/** Mark every alert on a site as read. */
-export async function markSiteRead(siteId: string): Promise<void> {
-  await db
-    .update(alerts)
-    .set({ readAt: new Date() })
-    .where(and(eq(alerts.siteId, siteId)));
+  return rows
+    .filter(({ site, plan }) => {
+      if (!site.lastCheckedAt) return true; // never checked
+      const hours = (now.getTime() - site.lastCheckedAt.getTime()) / 3_600_000;
+      const frequency = allowedFrequency(plan, site.frequency);
+      // A little under the nominal interval, so a cron that fires a few
+      // minutes early doesn't skip a site until the next day.
+      return frequency === "DAILY" ? hours >= 23 : hours >= 167;
+    })
+    .map(({ site }) => site);
 }

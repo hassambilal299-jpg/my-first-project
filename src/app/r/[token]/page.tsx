@@ -4,7 +4,8 @@ import { notFound } from "next/navigation";
 import { desc, eq } from "drizzle-orm";
 import { ArrowRight } from "@phosphor-icons/react/dist/ssr";
 import { db } from "@/lib/db";
-import { checks, sites } from "@/lib/schema";
+import { checks, sites, users } from "@/lib/schema";
+import { canShareReports } from "@/lib/plans";
 import { Report } from "@/components/report";
 import { Wordmark } from "@/components/site-chrome";
 import { RelativeTime } from "@/components/relative-time";
@@ -18,7 +19,7 @@ import type { AuditResult } from "@/lib/audit";
  * here reveals who owns the account or what else they monitor.
  */
 export const metadata: Metadata = {
-  title: "Website report — Sitegrade",
+  title: "Website report",
   robots: { index: false, follow: false },
 };
 
@@ -32,12 +33,25 @@ export default async function SharedReportPage({
   const { token } = await params;
   if (!token) notFound();
 
-  const site = await db.query.sites.findFirst({
-    where: eq(sites.shareToken, token),
-  });
+  const [row] = await db
+    .select({ site: sites, plan: users.plan })
+    .from(sites)
+    .innerJoin(users, eq(sites.userId, users.id))
+    .where(eq(sites.shareToken, token))
+    .limit(1);
+
   // A revoked link and a link that never existed look identical, which is
   // what you want — neither confirms that a token was once valid.
-  if (!site) notFound();
+  if (!row) notFound();
+
+  // Sharing is a paid feature, so the link has to stop working when the
+  // owner stops paying. Checked here rather than only at the moment the link
+  // is created, because a downgrade doesn't come back through that code —
+  // which is exactly how every link a lapsed customer had ever sent stayed
+  // live for ever.
+  if (!canShareReports(row.plan)) notFound();
+
+  const site = row.site;
 
   const latest = await db.query.checks.findFirst({
     where: eq(checks.siteId, site.id),

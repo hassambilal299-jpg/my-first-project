@@ -263,7 +263,8 @@ export default async function SitePage({
               icon={<CheckCircle weight="fill" className="size-6" />}
               title="Nothing has changed yet"
             >
-              We&apos;ll list every change here — and email you when it matters.
+              We&apos;ll list every change here
+              {plan.emailAlerts ? " — and email you when it matters." : "."}
             </EmptyState>
           ) : (
             <ul className="divide-y divide-line">

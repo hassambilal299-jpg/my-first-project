@@ -66,6 +66,7 @@ export const PLANS: Record<Plan, PlanSpec> = {
       "10 websites",
       "Checked every day",
       "Emailed the moment something breaks",
+      "Alerts to any address, per site",
       "Shareable report links for clients",
       "Full history and score trend",
     ],
@@ -82,8 +83,8 @@ export const PLANS: Record<Plan, PlanSpec> = {
     blurb: "For a shop looking after a book of clients.",
     features: [
       "50 websites",
+      "Everything in Pro",
       "Checked every day",
-      "Alerts to any address per site",
       "Shareable report links for clients",
       "Priority email support",
     ],

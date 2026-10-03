@@ -38,10 +38,19 @@ function connect(): Db {
 
   const instance = drizzle(client, { schema });
 
-  if (process.env.NODE_ENV !== "production") {
-    globalForDb.__sitegradeClient = client;
-    globalForDb.__sitegradeDb = instance;
-  }
+  // Cached in EVERY environment, production included.
+  //
+  // This used to be guarded by `NODE_ENV !== "production"`, on the usual
+  // reasoning that the global cache is only there to survive hot reloads.
+  // That was badly wrong here: `db` below is a Proxy that calls connect() on
+  // every property read, so without the cache each `db.query…` opened a
+  // brand-new Postgres pool. One dashboard render touches `db` half a dozen
+  // times, and a serverless host keeps the instance warm — so a few dozen
+  // page views exhausted the connection limit and every page started
+  // throwing, with nothing short of a redeploy to clear it.
+  globalForDb.__sitegradeClient = client;
+  globalForDb.__sitegradeDb = instance;
+
   return instance;
 }
 
