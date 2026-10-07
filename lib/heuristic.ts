@@ -210,6 +210,10 @@ function titleFrom(hook: string): string {
 
   text = text.replace(/[.,;:!?]+$/, "").trim();
 
+  // Auto-caption text arrives entirely lower case, so the pronoun comes
+  // through as "i" and a title reads as a typo: "My cofounder and i argued".
+  text = text.replace(/\bi\b/g, "I");
+
   if (text.length > 58) {
     const cut = text.slice(0, 58);
     const space = cut.lastIndexOf(" ");
