@@ -8,6 +8,8 @@ interface Props {
   segments: Segment[];
   videoId: string;
   isSample: boolean;
+  /** How many clips were asked for, so a shortfall can be explained. */
+  asked?: number;
 }
 
 type Order = "time" | "score";
@@ -25,6 +27,17 @@ function ScoreMeter({ score }: { score: number }) {
   );
 }
 
+/** Loose equality for text: the hook and the caption's opening line are often
+ *  the same sentence, and printing it twice on one card looks like a bug. */
+function sameText(a: string, b: string): boolean {
+  const norm = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const x = norm(a);
+  const y = norm(b);
+  if (!x || !y) return false;
+  return x === y || y.startsWith(x) || x.startsWith(y);
+}
+
 function clipAsText(seg: Segment): string {
   const tags = seg.hashtags.map((t) => `#${t}`).join(" ");
   return [
@@ -40,7 +53,7 @@ function clipAsText(seg: Segment): string {
     .join("\n");
 }
 
-export default function ClipList({ segments, videoId, isSample }: Props) {
+export default function ClipList({ segments, videoId, isSample, asked }: Props) {
   const [open, setOpen] = useState<number | null>(null);
   const [order, setOrder] = useState<Order>("time");
   const [copied, setCopied] = useState<string>("");
@@ -65,6 +78,10 @@ export default function ClipList({ segments, videoId, isSample }: Props) {
     0,
   );
 
+  // A short video simply cannot fit n non-overlapping clips of the chosen
+  // length. Saying so beats quietly returning fewer than were asked for.
+  const short = !isSample && typeof asked === "number" && segments.length < asked;
+
   return (
     <section className="clips">
       <div className="clips__lede">
@@ -75,7 +92,11 @@ export default function ClipList({ segments, videoId, isSample }: Props) {
           <p>
             {isSample
               ? "A worked example. Paste your own link above to run it for real."
-              : `Best scores ${best}. Scores rank these against each other, not against the internet.`}
+              : short
+                ? `Asked for ${asked}, but only ${segments.length} ${
+                    segments.length === 1 ? "stretch" : "stretches"
+                  } of this video will fit a clip that long without overlapping. Try a shorter clip length.`
+                : `Best scores ${best}. Scores rank these against each other, not against the internet.`}
           </p>
         </div>
 
@@ -129,7 +150,9 @@ export default function ClipList({ segments, videoId, isSample }: Props) {
 
             <div className="clip__body">
               <h3 className="clip__title">{seg.title}</h3>
-              {seg.hook && <p className="clip__hook">{seg.hook}</p>}
+              {seg.hook && !sameText(seg.hook, seg.caption) && (
+                <p className="clip__hook">{seg.hook}</p>
+              )}
               {seg.reason && <p className="clip__why">{seg.reason}</p>}
 
               <dl className="marks">

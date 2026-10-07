@@ -114,87 +114,218 @@ function clamp(n: number): number {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
+/**
+ * Why the bases are low and the steps are large.
+ *
+ * The first version started each mark near 50 and nudged by 6-15. Measured over
+ * 52 candidates, payoff came out 48 for more than half of them and every
+ * overall score landed between 33 and 71 - so the UI's four-bar meter lit three
+ * bars on every clip and "Best first" was close to random. A score only earns
+ * its place if it separates clips, so a clip with no signal now lands in the
+ * 20s-30s and one with several lands in the 80s, which also matches what the
+ * model prompt asks of the model ("a mediocre clip should score in the 40s").
+ */
+
 /** Does the first line stop a scroll on its own? */
 export function markHook(first: string): number {
   const t = first.toLowerCase();
-  let score = 46;
+  let score = 30;
 
-  if (/\?\s*$/.test(first)) score += 14;
-  if (HAS_NUMBER.test(first)) score += 13;
-  if (has(t, HOOK_WORDS)) score += 15;
+  if (/\?\s*$/.test(first)) score += 18;
+  if (HAS_NUMBER.test(first)) score += 16;
+  if (has(t, HOOK_WORDS)) score += 18;
 
   // A short opener reads as a claim; a long one reads as a preamble.
   const words = t.split(/\s+/).length;
-  if (words <= 14) score += 8;
-  else if (words >= 30) score -= 10;
+  if (words <= 14) score += 10;
+  else if (words >= 30) score -= 12;
 
-  if (FILLER_OPENERS.includes(firstWord(t))) score -= 13;
-  if (DANGLING_OPENERS.includes(firstWord(t))) score -= 9;
+  if (FILLER_OPENERS.includes(firstWord(t))) score -= 16;
+  if (DANGLING_OPENERS.includes(firstWord(t))) score -= 12;
 
   return clamp(score);
+}
+
+/** A capitalised word that is NOT just the start of a sentence.
+ *
+ *  The first version tested `/\b[A-Z][a-z]{2,}\b/` against `whole.slice(1)`,
+ *  meaning to skip the opening capital. But `whole` is several sentences
+ *  joined, so every later sentence's first word still matched and the bonus
+ *  fired on essentially every punctuated clip. Proper nouns have to be found
+ *  away from a sentence start to mean anything. */
+function hasProperNoun(whole: string): boolean {
+  return /[a-z,]\s+[A-Z][a-z]{2,}/.test(whole);
 }
 
 /** Does it make sense with zero context from the rest of the video? */
 export function markStandalone(first: string, whole: string): number {
   const f = first.toLowerCase();
   const w = whole.toLowerCase();
-  let score = 62;
+  let score = 58;
 
-  if (has(w, BACK_REFERENCE)) score -= 22;
-  if (DANGLING_OPENERS.includes(firstWord(f))) score -= 16;
-  if (FILLER_OPENERS.includes(firstWord(f))) score -= 8;
+  if (has(w, BACK_REFERENCE)) score -= 28;
+  if (DANGLING_OPENERS.includes(firstWord(f))) score -= 20;
+  if (FILLER_OPENERS.includes(firstWord(f))) score -= 10;
 
-  // A proper noun or a figure gives the listener something concrete to hold.
-  if (HAS_NUMBER.test(whole)) score += 7;
-  if (/\b[A-Z][a-z]{2,}\b/.test(whole.slice(1))) score += 6;
+  // A figure or a name gives the listener something concrete to hold.
+  if (HAS_NUMBER.test(whole)) score += 12;
+  if (hasProperNoun(whole)) score += 10;
 
   return clamp(score);
 }
 
-/** Does it land something before it ends? */
-export function markPayoff(last: string, whole: string, first: string): number {
+/**
+ * Does it land something before it ends?
+ *
+ * `tail` is the closing stretch rather than only the final sentence: a point
+ * often lands one sentence before the clip stops, and scoring the last
+ * sentence alone was why this mark sat at its base value for most candidates.
+ *
+ * `punctuated` says whether the caption track has sentence punctuation at all.
+ * Without it there is no such thing as a clean terminal mark, so neither the
+ * bonus for ending on one nor the penalty for ending mid-clause is evidence of
+ * anything - applying them anyway marked down every clip of every
+ * auto-captioned video, which is most videos.
+ */
+export function markPayoff(
+  last: string,
+  tail: string,
+  whole: string,
+  first: string,
+  punctuated: boolean,
+): number {
   const l = last.toLowerCase();
+  const t = tail.toLowerCase();
   const w = whole.toLowerCase();
-  let score = 48;
+  let score = 32;
 
-  if (has(l, PAYOFF_WORDS)) score += 14;
-  if (HAS_NUMBER.test(last)) score += 10;
+  if (has(t, PAYOFF_WORDS)) score += 18;
+  if (HAS_NUMBER.test(tail)) score += 14;
 
   // Setup then turn: a contrast after the opening line is the shape of a
   // point being made rather than a list being read out.
   if (has(w.slice(first.length), CONTRAST_WORDS)) score += 12;
 
   // A question at the end leaves it hanging.
-  if (/\?\s*$/.test(last)) score -= 12;
+  if (/\?\s*$/.test(last)) score -= 14;
 
-  // So does ending mid-clause. Unpunctuated auto-captions are chunked by word
-  // count, so this is the common case, not the rare one: the chunk boundary
-  // falls wherever it falls and most of them land mid-sentence.
-  if (/[,;:]\s*$/.test(last)) score -= 10;
-
-  // Only when the line has no terminal punctuation. "That fixed it." ends on
-  // a pronoun and is a complete sentence; penalising it would mark a clean
-  // close as a cut-off one, and most real closes end on a short word.
-  if (!ENDER.test(last.trim()) && TRAILING_WORDS.includes(lastWord(last))) {
-    score -= 16;
+  if (punctuated) {
+    if (ENDER.test(last.trim())) score += 10;
+    else if (TRAILING_WORDS.includes(lastWord(last))) score -= 18;
+    if (/[,;:]\s*$/.test(last)) score -= 12;
   }
 
   return clamp(score);
 }
 
-/** Topic words for hashtags: the most repeated content words in a clip. */
-export function tagsFrom(text: string, max = 4): string[] {
-  const counts = new Map<string, number>();
 
-  for (const raw of text.toLowerCase().split(/[^a-z0-9']+/)) {
-    const word = raw.replace(/'/g, "");
-    if (word.length < 4 || STOPWORDS.has(word)) continue;
-    if (/^\d+$/.test(word)) continue;
-    counts.set(word, (counts.get(word) || 0) + 1);
+/**
+ * Words that are common in speech but say nothing about the topic. Separate
+ * from STOPWORDS, which exists to stop grammar words being counted at all;
+ * these are content-shaped words that still make a useless hashtag.
+ */
+const NOT_A_TOPIC = new Set([
+  "anything", "everything", "something", "nothing", "anyone", "everybody",
+  "again", "asked", "asking", "answer", "about", "after", "before",
+  "being", "better", "called", "couple", "coming", "doing", "every",
+  "first", "going", "happen", "happened", "having", "least", "little",
+  "looking", "maybe", "mean", "means", "meant", "moment", "never",
+  "other", "others", "person", "place", "point", "probably", "putting",
+  "saying", "second", "seems", "simply", "start", "started", "still",
+  "stuff", "taking", "talk", "talking", "tell", "telling", "thought",
+  "three", "times", "trying", "turned", "understand", "using", "whole",
+  "working", "would", "years", "basically", "literally", "obviously",
+  "honestly", "exactly", "where", "which", "while", "whether", "because",
+  "there", "these", "those", "their",
+  // Numbers written out: they pass the length test and read as topics.
+  "eleven", "twelve", "thirteen", "fifteen", "twenty", "thirty", "forty",
+  "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand",
+  "million", "billion", "percent", "dozen",
+  // Months and weekdays: concentrated in one clip by definition, and never
+  // what the clip is about.
+  "january", "february", "march", "april", "june", "july", "august",
+  "september", "october", "november", "december", "monday", "tuesday",
+  "wednesday", "thursday", "friday", "saturday", "sunday",
+]);
+
+/**
+ * Topic words for hashtags.
+ *
+ * Two earlier versions were both wrong in instructive ways. The first took the
+ * most repeated content words in the clip and produced #eleven, #losing,
+ * #north and #moment - single occurrences of ordinary words printed under a
+ * Copy button as if ready to post. The second demanded a word repeat inside
+ * the clip, which is far too strict: a 30-second clip is about eighty words and
+ * a topic word earns one mention, so nearly every clip came back with no tags
+ * at all and the feature quietly disappeared.
+ *
+ * What actually marks a word as this clip's topic is being concentrated here
+ * relative to the rest of the video. "People" and "number" recur across a whole
+ * episode and tell you nothing; "pricing", "onboarding" and "enthusiasm" show
+ * up in one stretch and nowhere else. So the ranking is the word's density in
+ * the clip against its density across the transcript, with repetition inside
+ * the clip as a bonus rather than a gate.
+ *
+ * Returning nothing is still a valid answer. Four junk tags are worse than none.
+ */
+export function tagsFrom(text: string, corpus?: string, max = 3): string[] {
+  const words = (s: string) =>
+    s
+      .toLowerCase()
+      .split(/[^a-z0-9']+/)
+      .map((w) => w.replace(/'/g, ""))
+      .filter(
+        (w) =>
+          w.length >= 5 &&
+          !/^\d/.test(w) &&
+          !STOPWORDS.has(w) &&
+          !NOT_A_TOPIC.has(w),
+      );
+
+  const clipWords = words(text);
+  if (!clipWords.length) return [];
+
+  const clipCounts = new Map<string, number>();
+  for (const w of clipWords) clipCounts.set(w, (clipCounts.get(w) || 0) + 1);
+
+  const corpusWords = corpus ? words(corpus) : [];
+  const corpusCounts = new Map<string, number>();
+  for (const w of corpusWords) {
+    corpusCounts.set(w, (corpusCounts.get(w) || 0) + 1);
   }
 
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  // Without the rest of the transcript to compare against, repetition inside
+  // the clip is the only evidence there is, so it becomes the requirement.
+  const haveCorpus = corpusWords.length > clipWords.length;
+
+  const scored: Array<{ word: string; weight: number }> = [];
+
+  for (const [word, count] of clipCounts) {
+    if (!haveCorpus) {
+      if (count >= 2) scored.push({ word, weight: count });
+      continue;
+    }
+
+    const here = count / clipWords.length;
+    const overall = (corpusCounts.get(word) || count) / corpusWords.length;
+    const concentration = here / Math.max(overall, 1e-9);
+
+    // A word spread evenly through the video sits at ~1 and is the speaker's
+    // vocabulary, not this clip's subject.
+    if (concentration < 1.6) continue;
+
+    // Concentration alone cannot tell a topic from a passing detail: a name
+    // or a place mentioned once is perfectly concentrated and still not what
+    // the clip is about. So a word said only once has to at least be a long
+    // one, which is the cheapest proxy for a substantive term there is.
+    if (count < 2 && word.length < 7) continue;
+
+    scored.push({ word, weight: concentration * (1 + Math.log(count)) });
+  }
+
+  return scored
+    .sort((a, b) => b.weight - a.weight || a.word.localeCompare(b.word))
     .slice(0, max)
-    .map(([w]) => w);
+    .map((s) => s.word);
 }
+

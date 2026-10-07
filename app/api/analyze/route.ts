@@ -160,6 +160,7 @@ export async function POST(request: Request) {
       segments,
       density: buildDensity(video.cues, video.durationSeconds),
       picker,
+      asked: count,
     };
 
     return NextResponse.json(result);

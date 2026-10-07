@@ -33,15 +33,21 @@ interface Token {
   text: string;
   start: number;
   end: number;
+  /** Seconds of silence immediately before this word. */
+  gapBefore: number;
 }
 
 /**
  * Cue text to timed words. A cue's words are spread evenly across its own
  * duration - not exact, but the error is a fraction of a second and segment
  * edges land on sentence gaps anyway.
+ *
+ * The gap between one cue's end and the next cue's start is kept, because on a
+ * track with no punctuation it is the only sentence boundary left.
  */
 export function tokenize(cues: Cue[]): Token[] {
   const tokens: Token[] = [];
+  let prevEnd: number | null = null;
 
   for (const cue of cues) {
     const words = cue.text.split(/\s+/).filter(Boolean);
@@ -49,14 +55,18 @@ export function tokenize(cues: Cue[]): Token[] {
 
     const span = Math.max(0.001, cue.end - cue.start);
     const per = span / words.length;
+    const gap = prevEnd === null ? 0 : Math.max(0, cue.start - prevEnd);
 
     words.forEach((w, i) => {
       tokens.push({
         text: w,
         start: cue.start + i * per,
         end: cue.start + (i + 1) * per,
+        gapBefore: i === 0 ? gap : 0,
       });
     });
+
+    prevEnd = cue.end;
   }
 
   return tokens;
@@ -71,20 +81,38 @@ export interface Sentence {
   words: number;
 }
 
-/** Words per pseudo-sentence when the track has no punctuation at all. */
-const CHUNK_WORDS = 14;
+export interface Track {
+  sentences: Sentence[];
+  /** Whether the caption track carries sentence punctuation at all. */
+  punctuated: boolean;
+}
+
+/** Hard cap on a pseudo-sentence when no pause arrives to end one. */
+const CHUNK_WORDS = 18;
+
+/** A pause this long reads as the end of a thought rather than a breath. */
+const PAUSE = 0.5;
+
+/** Below this, honouring a pause would leave a fragment too short to open on. */
+const MIN_CHUNK_WORDS = 5;
 
 /**
  * Group words into sentences.
  *
- * YouTube's automatic captions often carry NO punctuation - no periods at all.
- * Splitting on enders alone would make one sentence of the whole video and
- * every candidate would be identical, so when enders are rare we fall back to
- * fixed word chunks. The threshold is per-word, not absolute, so it holds for
- * a two-minute video and a two-hour one alike.
+ * YouTube's automatic captions usually carry NO punctuation - no periods at
+ * all - and splitting on enders alone would make one sentence of the whole
+ * video. The first version fell back to fixed 14-word chunks, which is why
+ * every clip on an auto-captioned video began mid-clause: measured on a
+ * realistic track, pseudo-sentences came out as "been our north star for two
+ * years it turned out we were measuring the". Chunk boundaries fall wherever
+ * the counter lands.
+ *
+ * Speech has one boundary left that survives the loss of punctuation: the
+ * speaker stopping. So an unpunctuated track is cut at pauses, and the word
+ * count is only the fallback for a stretch with no pause in it.
  */
-export function buildSentences(tokens: Token[]): Sentence[] {
-  if (!tokens.length) return [];
+export function buildSentences(tokens: Token[]): Track {
+  if (!tokens.length) return { sentences: [], punctuated: false };
 
   const enders = tokens.filter((t) => ENDER.test(t.text)).length;
   const punctuated = enders / tokens.length > 0.012;
@@ -107,7 +135,30 @@ export function buildSentences(tokens: Token[]): Sentence[] {
     buf = [];
   };
 
+  /**
+   * A pause has arrived but the buffer holds only a scrap - the tail of a
+   * sentence the word cap cut in half. That scrap belongs to the sentence it
+   * came from, not to the one about to start, so give it back rather than
+   * letting it push the next clip's opening line off the front.
+   */
+  const giveBack = () => {
+    const prev = out[out.length - 1];
+    if (!prev || !buf.length) return flush();
+    prev.text = `${prev.text} ${buf.map((t) => t.text).join(" ")}`
+      .replace(/\s+/g, " ")
+      .trim();
+    prev.end = buf[buf.length - 1].end;
+    prev.words += buf.length;
+    buf = [];
+  };
+
   for (const token of tokens) {
+    // A pause belongs before this word, so close the previous sentence first.
+    if (!punctuated && token.gapBefore >= PAUSE) {
+      if (buf.length >= MIN_CHUNK_WORDS) flush();
+      else if (buf.length) giveBack();
+    }
+
     buf.push(token);
 
     if (punctuated) {
@@ -119,8 +170,9 @@ export function buildSentences(tokens: Token[]): Sentence[] {
   }
   flush();
 
-  return out;
+  return { sentences: out, punctuated };
 }
+
 
 /* --------------------------------------------------------------- selection */
 
@@ -128,13 +180,61 @@ interface Candidate extends Segment {
   density: number;
 }
 
-function titleFrom(hook: string): string {
-  const cleaned = hook.replace(/^[^A-Za-z0-9]+/, "").replace(/\s+/g, " ").trim();
-  if (cleaned.length <= 62) return cleaned.replace(/[.!?]+$/, "");
+/** Leading words that are throat-clearing rather than part of the claim. */
+const LEADING_FILLER =
+  /^(?:so|and|but|also|well|okay|ok|um|uh|yeah|right|anyway|then|plus|because|like|i mean|you know)\s+/i;
 
-  const cut = cleaned.slice(0, 62);
-  const space = cut.lastIndexOf(" ");
-  return `${(space > 24 ? cut.slice(0, space) : cut).replace(/[.,;:]+$/, "")}…`;
+/** Where a sentence's main clause gives way to its tail. */
+const CLAUSE_BREAK = /,|\s+(?:and|but|so|because|which|that|while|although|though|however)\s+/i;
+
+/**
+ * A short label for the clip, not the opening line verbatim.
+ *
+ * The first version returned the first sentence trimmed to 62 characters, with
+ * the result that the card printed the same sentence three times - as the
+ * title, as the hook quote under it, and again in the caption block. A title
+ * is a different job: cut the claim out of the sentence, drop the tail, and
+ * capitalise it, which also matters because auto-caption text arrives entirely
+ * in lower case.
+ */
+function titleFrom(hook: string): string {
+  let text = hook
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(LEADING_FILLER, "");
+
+  // Keep the main clause when dropping the tail still leaves something whole.
+  const breakAt = text.search(CLAUSE_BREAK);
+  if (breakAt >= 24) text = text.slice(0, breakAt);
+
+  text = text.replace(/[.,;:!?]+$/, "").trim();
+
+  if (text.length > 58) {
+    const cut = text.slice(0, 58);
+    const space = cut.lastIndexOf(" ");
+    text = `${space > 24 ? cut.slice(0, space) : cut}…`;
+  }
+
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * The line to post with the clip.
+ *
+ * Without a model there is no writing it in the creator's voice, so it stays
+ * the speaker's own words - but the opening line alone is exactly what the hook
+ * field already shows. Pairing the opening with the line the clip closes on
+ * reads like a real post and says something the hook does not.
+ */
+function captionFrom(first: string, last: string): string {
+  const open = first.replace(/\s+/g, " ").trim();
+  const close = last.replace(/\s+/g, " ").trim();
+
+  if (!close || close === open || open.includes(close)) {
+    return open.slice(0, 280);
+  }
+  return `${open}\n\n${close}`.slice(0, 280);
 }
 
 
@@ -172,6 +272,8 @@ function reasonFrom(first: string, last: string, whole: string): string {
 function buildCandidates(
   sentences: Sentence[],
   cues: Cue[],
+  punctuated: boolean,
+  corpusText: string,
   minLen: number,
   maxLen: number,
   target: number,
@@ -198,10 +300,17 @@ function buildCandidates(
     const last = picked[picked.length - 1].text;
     const whole = picked.map((s) => s.text).join(" ");
 
+    // The closing stretch, not just the final sentence: a point often lands a
+    // sentence before the clip stops.
+    const tail = picked
+      .slice(Math.max(0, picked.length - Math.max(1, Math.ceil(picked.length / 3))))
+      .map((s) => s.text)
+      .join(" ");
+
     const marks = {
       hook: markHook(first),
       standalone: markStandalone(first, whole),
-      payoff: markPayoff(last, whole, first),
+      payoff: markPayoff(last, tail, whole, first, punctuated),
     };
 
     const words = picked.reduce((sum, s) => sum + s.words, 0);
@@ -216,9 +325,8 @@ function buildCandidates(
       reason: reasonFrom(first, last, whole),
       marks,
       score: overallScore(marks),
-      // Without a model the honest caption is the speaker's own opening line.
-      caption: first.replace(/\s+/g, " ").trim().slice(0, 280),
-      hashtags: tagsFrom(whole),
+      caption: captionFrom(first, last),
+      hashtags: tagsFrom(whole, corpusText),
       excerpt: excerptFor(cues, start, end),
       density: words / Math.max(1, end - start),
     });
@@ -280,12 +388,18 @@ export function selectByHeuristic(
   cues: Cue[],
   opts: { n: number; duration: number; minLen: number; maxLen: number; target: number },
 ): Segment[] {
-  const sentences = buildSentences(tokenize(cues));
+  const { sentences, punctuated } = buildSentences(tokenize(cues));
   if (!sentences.length) return [];
+
+  // The whole transcript, so hashtags can tell a clip's topic apart from the
+  // speaker's habitual vocabulary.
+  const corpusText = sentences.map((s) => s.text).join(" ");
 
   const candidates = buildCandidates(
     sentences,
     cues,
+    punctuated,
+    corpusText,
     opts.minLen,
     opts.maxLen,
     opts.target,

@@ -805,6 +805,9 @@ select {
 .post__text {
   margin: 0;
   font-size: 15px;
+  /* The free picker's caption is two lines - the clip's opening line and the
+     line it closes on - so the break between them has to survive. */
+  white-space: pre-line;
 }
 
 .post__tags {

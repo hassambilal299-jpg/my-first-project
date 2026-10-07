@@ -14,6 +14,8 @@ export interface AnalyzeResult {
   sample?: boolean;
   /** Which picker chose these. Absent on the sample. */
   picker?: Picker;
+  /** How many clips were requested, so a shortfall can be explained. */
+  asked?: number;
 }
 
 /**

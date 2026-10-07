@@ -229,6 +229,7 @@ export default function Analyzer() {
         segments={result.segments}
         videoId={result.video.id}
         isSample={isSample}
+        asked={result.asked}
       />
     </>
   );
