@@ -62,7 +62,7 @@ export const INDEX_HTML = `<!doctype html>
     <div id="log" aria-live="polite"></div>
     <div class="row" style="margin-top:12px">
       <button class="mic" id="mic" aria-label="Talk">Talk</button>
-      <input type="text" id="input" placeholder="Or type here" aria-label="Message">
+      <input type="text" id="input" placeholder='Try "brief acme" or "pending"' aria-label="Message">
       <button id="send">Send</button>
       <button class="secondary" id="speakToggle" aria-pressed="true">Voice reply: on</button>
     </div>
@@ -120,7 +120,17 @@ export const INDEX_HTML = `<!doctype html>
     loadStatus();
     loadBusinesses();
     loadApprovals();
-    addLine("jarvis", "Ready. What do you need?");
+    addLine("jarvis", "Ready. Say or type \\u201chelp\\u201d to see what works without any AI cost.");
+  }
+
+  // Tag replies that cost nothing, so AI spend stays visible.
+  function markFree() {
+    const last = $("log").lastElementChild;
+    if (!last) return;
+    const tag = document.createElement("span");
+    tag.className = "muted";
+    tag.textContent = "  (no AI used)";
+    last.appendChild(tag);
   }
 
   function addLine(who, text) {
@@ -177,8 +187,9 @@ export const INDEX_HTML = `<!doctype html>
     $("send").disabled = true;
     addLine("you", message);
     try {
-      const { text } = await api("/api/chat", { method: "POST", body: JSON.stringify({ message }) });
+      const { text, usedAI } = await api("/api/chat", { method: "POST", body: JSON.stringify({ message }) });
       addLine("jarvis", text);
+      if (usedAI === false) markFree();
       speak(text);
       loadApprovals();
     } catch (err) {

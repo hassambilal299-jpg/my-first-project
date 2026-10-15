@@ -13,6 +13,7 @@ import { createConnectors } from "../src/connectors.js";
 import { buildTools, executorFor } from "../src/tools.js";
 import { createAgent } from "../src/agent.js";
 import { syncBusiness, syncAll } from "../src/sync.js";
+import { runCommand } from "../src/commands.js";
 
 const TOKEN = "test-token-1234567890";
 const KEY = "a".repeat(64);
@@ -53,7 +54,7 @@ test("refuses to start with a weak or missing token", () => {
   assert.throws(() => createApp({}), /AGENT_TOKEN/);
 });
 
-test("starts without an Anthropic key and says so in chat", async () => {
+test("without an Anthropic key, chat offers the free commands instead of failing", async () => {
   const { server } = createApp({ AGENT_TOKEN: TOKEN, STORE_FILE: tmpFile() });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   try {
@@ -62,7 +63,9 @@ test("starts without an Anthropic key and says so in chat", async () => {
       headers: auth,
       body: JSON.stringify({ message: "hi" }),
     });
-    assert.match((await res.json()).text, /API key/);
+    const body = await res.json();
+    assert.match(body.text, /don't have an AI key/);
+    assert.match(body.text, /brief/, "must tell the user what still works");
   } finally {
     server.close();
   }
@@ -622,6 +625,97 @@ test("tools report unknown businesses as an error instead of throwing", async ()
   const { tools } = wiring();
   const out = await tools.call("business_brief", { business: "Ghost" });
   assert.match(out.error, /No businesses set up yet/);
+});
+
+// -------------------------------------------------------- command mode -----
+
+test("commands run with no AI key and no network", async () => {
+  const w = wiring();
+  await w.directory.add({ name: "Acme" });
+
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor };
+
+  const help = await runCommand("help", deps);
+  assert.match(help.text, /brief/);
+
+  const list = await runCommand("businesses", deps);
+  assert.match(list.text, /Acme/);
+
+  const added = await runCommand("add business Blue Bottle", deps);
+  assert.match(added.text, /Added Blue Bottle/);
+
+  const noted = await runCommand("note Acme client called about pricing", deps);
+  assert.match(noted.text, /Noted for Acme/);
+
+  const brief = await runCommand("how is Acme", deps);
+  assert.match(brief.text, /Acme/);
+  assert.match(brief.text, /client called about pricing/);
+
+  const pending = await runCommand("pending", deps);
+  assert.match(pending.text, /Nothing is waiting/);
+
+  const sync = await runCommand("sync", deps);
+  assert.match(sync.text, /Not connected yet/);
+});
+
+test("several phrasings reach the brief", async () => {
+  const w = wiring();
+  await w.directory.add({ name: "Acme" });
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor };
+
+  for (const phrase of ["brief Acme", "brief me on Acme", "how is Acme", "what's going on with Acme", "catch me up on Acme"]) {
+    const out = await runCommand(phrase, deps);
+    assert.equal(out?.command, "brief", `"${phrase}" should produce a brief`);
+  }
+});
+
+test("an unrecognised message falls through to the model", async () => {
+  const w = wiring();
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor };
+  assert.equal(await runCommand("write a poem about roofing", deps), null);
+});
+
+test("a command that matches but fails explains itself", async () => {
+  const w = wiring();
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor };
+  const out = await runCommand("brief Ghost", deps);
+  assert.equal(out.failed, true);
+  assert.match(out.text, /No businesses set up yet/);
+});
+
+test("the chat endpoint answers commands without calling the model", async () => {
+  let modelCalls = 0;
+  const w = wiring();
+  const agent = { respond: async () => { modelCalls++; return { text: "from model", toolsUsed: [] }; } };
+  const { server } = createApp({ AGENT_TOKEN: TOKEN }, { ...w, agent });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const ask = async (message) =>
+      (await fetch(`${base}/api/chat`, { method: "POST", headers: auth, body: JSON.stringify({ message }) })).json();
+
+    const cmd = await ask("businesses");
+    assert.equal(cmd.usedAI, false);
+    assert.equal(modelCalls, 0, "a command must not spend money on the model");
+
+    const free = await ask("write me a haiku");
+    assert.equal(free.usedAI, true);
+    assert.equal(modelCalls, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test("the default model is the cheapest one unless overridden", async () => {
+  const w = wiring();
+  const { server } = createApp({ AGENT_TOKEN: TOKEN }, { ...w, agent: { respond: async () => ({ text: "" }) } });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/status`, { headers: auth });
+    assert.equal((await res.json()).model, "claude-haiku-5-5");
+  } finally {
+    server.close();
+  }
 });
 
 function jsonResponse(data) {

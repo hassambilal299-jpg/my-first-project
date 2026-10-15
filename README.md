@@ -51,13 +51,33 @@ Three ideas carry the whole design:
 - **`AGENT_TOKEN` guards every API route**, compared in constant time. Vercel SSO
   sits in front of the `*.vercel.app` URL as an additional layer.
 
+## Cost
+
+The app is split so that **the expensive part is optional**.
+
+**Free, no API key, no credit:** briefs, the sweep, approvals, notes, adding
+businesses. All of it is computed from the database, so it costs nothing to run.
+Reached by voice or typing through command mode — say `help` to list it.
+
+**Paid, only for free-form conversation:** anything command mode does not
+recognise goes to Claude. Default model is `claude-haiku-5-5` at $0.10 per
+million input tokens and $0.50 per million output — the cheapest option, and
+ample for chat and reading briefs aloud. A typical exchange runs a few thousand
+tokens, so it costs a fraction of a cent; roughly a thousand exchanges per
+dollar. Requests also set `effort: "low"` and cache the system-and-tools prefix,
+which is most of each request.
+
+Set `ANTHROPIC_MODEL=claude-opus-5-5` to trade cost for depth: that is $4 / $20
+per million, around 40x the price. Worth it for hard reasoning, wasted on "what
+happened at Acme today".
+
 ## Environment variables
 
 | Variable | Required | What it does |
 |---|---|---|
 | `AGENT_TOKEN` | yes | The password you type into the app. 16+ chars. |
-| `ANTHROPIC_API_KEY` | yes | Claude API key. Without it the app loads but chat says the key is missing. |
-| `ANTHROPIC_MODEL` | no | Defaults to `claude-sonnet-5-5`. |
+| `ANTHROPIC_API_KEY` | no | Claude API key. Without it, command mode still works; only free-form chat is unavailable. |
+| `ANTHROPIC_MODEL` | no | Defaults to `claude-haiku-5-5`, the cheapest model. |
 | `CREDENTIALS_KEY` | for clients | 64 hex chars. Encrypts client credentials. Without it, storing them is refused. |
 | `SUPABASE_STORE_URL` | for persistence | The Edge Function URL. Without it, storage falls back to a local JSON file. |
 | `SUPABASE_API_KEY` | for persistence | Supabase publishable key. |
@@ -80,7 +100,7 @@ better than a brief full of invented activity.
 ```bash
 cp .env.example .env     # fill in AGENT_TOKEN and ANTHROPIC_API_KEY
 npm start                # http://localhost:3000
-npm test                 # 46 tests, no network needed
+npm test                 # 52 tests, no network needed
 npm run build:ui         # after editing public/index.html
 ```
 

@@ -10,11 +10,15 @@ import { createConnectors } from "./connectors.js";
 import { buildTools, executorFor } from "./tools.js";
 import { createAgent } from "./agent.js";
 import { syncAll } from "./sync.js";
+import { runCommand, HELP } from "./commands.js";
 import { INDEX_HTML } from "./ui.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_HISTORY = 20;
+// Haiku is the cheapest model and is ample for chat and brief narration.
+// Override with ANTHROPIC_MODEL to trade cost for depth.
+const DEFAULT_MODEL = "claude-haiku-5-5";
 
 export function createApp(env = process.env, deps = {}) {
   const token = env.AGENT_TOKEN;
@@ -45,16 +49,18 @@ export function createApp(env = process.env, deps = {}) {
   const tools = deps.tools ?? buildTools({ directory, approvals, connectorsFor, defaultConnectors });
   const execute = executorFor({ directory, connectorsFor, defaultConnectors });
 
+  // Without a Claude key the deterministic commands still work, so say what
+  // is possible rather than just reporting a missing key.
   const missingKeyAgent = {
     respond: async () => ({
-      text: "The Claude API key isn't set on the server yet. Ask the owner to add ANTHROPIC_API_KEY.",
+      text: `I don't have an AI key yet, so I can't handle free-form questions. ${HELP}`,
       toolsUsed: [],
     }),
   };
   const agent =
     deps.agent ??
     (env.ANTHROPIC_API_KEY
-      ? createAgent({ apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5", tools })
+      ? createAgent({ apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? DEFAULT_MODEL, tools })
       : missingKeyAgent);
 
   let history = [];
@@ -122,7 +128,7 @@ export function createApp(env = process.env, deps = {}) {
       if (req.method === "GET" && url.pathname === "/api/status") {
         return send(res, 200, {
           connectors: defaultConnectors.status(),
-          model: env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5",
+          model: env.ANTHROPIC_MODEL ?? DEFAULT_MODEL,
           storage: store instanceof RemoteStore ? "supabase" : "local file",
           credentialsEncryption: cipher.enabled,
           businesses: await directory.list().catch(() => []),
@@ -134,11 +140,20 @@ export function createApp(env = process.env, deps = {}) {
         if (typeof message !== "string" || !message.trim() || message.length > 4000) {
           return send(res, 400, { error: "message must be 1-4000 characters" });
         }
-        const result = await agent.respond(history, message.trim());
-        history.push({ role: "user", content: message.trim() });
+        const text = message.trim();
+
+        // Deterministic commands run first: instant, and they cost nothing.
+        // Anything they do not recognise goes to Claude.
+        const command = await runCommand(text, { directory, approvals, connectorsFor });
+        if (command) {
+          return send(res, 200, { text: command.text, command: command.command, usedAI: false });
+        }
+
+        const result = await agent.respond(history, text);
+        history.push({ role: "user", content: text });
         history.push({ role: "assistant", content: result.text || "(no reply)" });
         history = history.slice(-MAX_HISTORY);
-        return send(res, 200, { text: result.text, toolsUsed: result.toolsUsed });
+        return send(res, 200, { text: result.text, toolsUsed: result.toolsUsed, usedAI: true });
       }
 
       if (req.method === "GET" && url.pathname === "/api/businesses") {

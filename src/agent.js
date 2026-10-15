@@ -35,6 +35,12 @@ export function createAgent({ apiKey, model, tools, fetchImpl = fetch }) {
         system: SYSTEM_PROMPT,
         tools: tools.schemas,
         messages,
+        // Caches the stable system + tool prefix, which is most of each
+        // request, so repeat turns bill a fraction of the first.
+        cache_control: { type: "ephemeral" },
+        // Chat and brief narration do not need deep reasoning; low effort
+        // keeps token spend down.
+        output_config: { effort: "low" },
       }),
     });
     if (!res.ok) throw new Error(`Claude API ${res.status}: ${await res.text()}`);
