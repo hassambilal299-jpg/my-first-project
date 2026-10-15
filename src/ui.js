@@ -147,12 +147,45 @@ export const INDEX_HTML = `<!doctype html>
     speakOn = !speakOn;
     $("speakToggle").textContent = "Voice reply: " + (speakOn ? "on" : "off");
     $("speakToggle").setAttribute("aria-pressed", String(speakOn));
-    if (!speakOn) speechSynthesis?.cancel();
+    if (!speakOn) {
+      speechSynthesis?.cancel();
+      if (audio) audio.pause();
+    }
   };
-  function speak(text) {
-    if (!speakOn || !("speechSynthesis" in window)) return;
+  let voiceProvider = "browser";
+  let audio = null;
+
+  // The free browser voice. Always available, used as the fallback.
+  function speakWithBrowser(text) {
+    if (!("speechSynthesis" in window)) return;
     speechSynthesis.cancel();
     speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  }
+
+  // The real voice, generated server-side so the key never reaches this page.
+  // Any failure falls back rather than leaving the user in silence.
+  async function speakWithProvider(text) {
+    try {
+      const res = await fetch("/api/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error("speak failed");
+      const blob = await res.blob();
+      if (audio) { audio.pause(); URL.revokeObjectURL(audio.src); }
+      audio = new Audio(URL.createObjectURL(blob));
+      audio.onended = () => { URL.revokeObjectURL(audio.src); };
+      await audio.play();
+    } catch (_) {
+      speakWithBrowser(text);
+    }
+  }
+
+  function speak(text) {
+    if (!speakOn || !text) return;
+    if (voiceProvider === "elevenlabs") { speakWithProvider(text); return; }
+    speakWithBrowser(text);
   }
 
   // ----- Voice input -----
@@ -241,10 +274,12 @@ export const INDEX_HTML = `<!doctype html>
 
   async function loadStatus() {
     try {
-      const { connectors } = await api("/api/status");
-      $("status").textContent = Object.entries(connectors)
-        .map(([name, on]) => \`\${name}: \${on ? "connected" : "mock mode"}\`)
-        .join(" · ");
+      const { connectors, voice } = await api("/api/status");
+      voiceProvider = voice?.provider ?? "browser";
+      const lines = Object.entries(connectors)
+        .map(([name, on]) => \`\${name}: \${on ? "connected" : "mock mode"}\`);
+      lines.push(\`voice: \${voiceProvider === "elevenlabs" ? "ElevenLabs" : "browser (free)"}\`);
+      $("status").textContent = lines.join(" · ");
     } catch (_) {}
   }
 

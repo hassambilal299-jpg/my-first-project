@@ -71,6 +71,21 @@ Set `ANTHROPIC_MODEL=claude-opus-5-5` to trade cost for depth: that is $4 / $20
 per million, around 40x the price. Worth it for hard reasoning, wasted on "what
 happened at Acme today".
 
+## Voice
+
+Two modes, and it degrades rather than breaking:
+
+- **Browser voice (default, free).** `speechSynthesis` in the page. No key, no
+  cost, but it sounds synthetic.
+- **ElevenLabs (optional, paid).** Set `ELEVENLABS_API_KEY` and replies are
+  spoken by their `eleven_flash_v2_5` low-latency model. The browser posts text
+  to `/api/speak` and gets audio back, so **the key never reaches the page** or a
+  client's device. Audio is piped, not buffered, so playback starts before the
+  clip finishes. Billed per character, so replies are capped at 600 characters
+  server-side and any failure silently falls back to the browser voice.
+
+Speech recognition (listening) is always the browser's, which is free.
+
 ## Environment variables
 
 | Variable | Required | What it does |
@@ -83,6 +98,8 @@ happened at Acme today".
 | `SUPABASE_API_KEY` | for persistence | Supabase publishable key. |
 | `JARVIS_STORE_TOKEN` | no | Optional second lock on the Edge Function. Set it in Supabase, not here. |
 | `CRON_SECRET` | no | Set to the same value as `AGENT_TOKEN` so the daily sweep authenticates. |
+| `ELEVENLABS_API_KEY` | no | Real voice. Blank = the browser's free built-in voice. |
+| `ELEVENLABS_VOICE_ID` | no | Which voice. Blank = the first on the account. |
 | `GHL_API_KEY` | no | GoHighLevel. Blank = SMS in mock mode. |
 | `GMAIL_REFRESH_TOKEN` | no | Gmail. Blank = mock mode. |
 | `SHOPIFY_ACCESS_TOKEN`, `SHOPIFY_STORE_DOMAIN` | no | Shopify orders. |

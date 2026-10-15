@@ -13,7 +13,8 @@ import { createConnectors } from "../src/connectors.js";
 import { buildTools, executorFor } from "../src/tools.js";
 import { createAgent } from "../src/agent.js";
 import { syncBusiness, syncAll } from "../src/sync.js";
-import { runCommand } from "../src/commands.js";
+import { runCommand, suggest } from "../src/commands.js";
+import { createVoice, MAX_SPEECH_CHARS } from "../src/voice.js";
 
 const TOKEN = "test-token-1234567890";
 const KEY = "a".repeat(64);
@@ -54,18 +55,26 @@ test("refuses to start with a weak or missing token", () => {
   assert.throws(() => createApp({}), /AGENT_TOKEN/);
 });
 
-test("without an Anthropic key, chat offers the free commands instead of failing", async () => {
+test("without an Anthropic key, chat still answers commands and suggests near misses", async () => {
   const { server } = createApp({ AGENT_TOKEN: TOKEN, STORE_FILE: tmpFile() });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const ask = async (message) =>
+    (await fetch(`${base}/api/chat`, { method: "POST", headers: auth, body: JSON.stringify({ message }) })).json();
   try {
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/chat`, {
-      method: "POST",
-      headers: auth,
-      body: JSON.stringify({ message: "hi" }),
-    });
-    const body = await res.json();
-    assert.match(body.text, /don't have an AI key/);
-    assert.match(body.text, /brief/, "must tell the user what still works");
+    // A greeting is handled for free, with no key at all.
+    const hello = await ask("hi");
+    assert.equal(hello.usedAI, false);
+    assert.match(hello.text, /Hello/);
+
+    // A near miss names the command it probably meant.
+    const near = await ask("can you brief acme for me please right now");
+    assert.match(near.text, /Did you mean/);
+
+    // Something unrelated falls back to the full list.
+    const far = await ask("write a poem");
+    assert.match(far.text, /without an AI key/);
+    assert.match(far.text, /brief me/);
   } finally {
     server.close();
   }
@@ -633,7 +642,7 @@ test("commands run with no AI key and no network", async () => {
   const w = wiring();
   await w.directory.add({ name: "Acme" });
 
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor };
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
 
   const help = await runCommand("help", deps);
   assert.match(help.text, /brief/);
@@ -658,10 +667,69 @@ test("commands run with no AI key and no network", async () => {
   assert.match(sync.text, /Not connected yet/);
 });
 
+test("a greeting, status, and an all-business brief work with no AI", async () => {
+  const w = wiring();
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+
+  const empty = await runCommand("hello", deps);
+  assert.match(empty.text, /No businesses set up yet/);
+
+  await w.directory.add({ name: "Acme" });
+  await w.directory.add({ name: "Beta" });
+  await w.directory.record({
+    businessId: (await w.directory.resolve("Acme")).id,
+    source: "manual",
+    kind: "note",
+    summary: "called the client",
+  });
+
+  const greeted = await runCommand("hey", deps);
+  assert.match(greeted.text, /2 businesses/);
+
+  const all = await runCommand("brief me", deps);
+  assert.equal(all.command, "brief_all");
+  assert.match(all.text, /2 businesses/);
+  assert.match(all.text, /Acme: 1 event/);
+  assert.match(all.text, /Beta: quiet/);
+  assert.match(all.text, /Nothing waiting/);
+
+  const status = await runCommand("status", deps);
+  assert.match(status.text, /Nothing is connected yet/);
+  assert.match(status.text, /Not connected: /);
+});
+
+test("the all-business brief counts what is waiting for approval", async () => {
+  const w = wiring();
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+  const acme = await w.directory.add({ name: "Acme" });
+  await w.approvals.propose({ action: "send_sms", businessId: acme.id, summary: "SMS to c1", payload: {} });
+
+  const all = await runCommand("what's going on", deps);
+  assert.equal(all.command, "brief_all");
+  assert.match(all.text, /1 thing waiting for your approval/);
+});
+
+test("roll-up phrasings do not get mistaken for a business name", async () => {
+  const w = wiring();
+  await w.directory.add({ name: "Acme" });
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+
+  for (const phrase of ["brief me", "brief", "catch me up", "what's happening", "whats new", "update me", "summary"]) {
+    const out = await runCommand(phrase, deps);
+    assert.equal(out?.command, "brief_all", `"${phrase}" should roll up, not resolve a business`);
+  }
+});
+
+test("suggest points at the nearest command", () => {
+  assert.equal(suggest("please sync everything"), "sync");
+  assert.match(suggest("add business for acme"), /add business/);
+  assert.equal(suggest("zzzzz"), null);
+});
+
 test("several phrasings reach the brief", async () => {
   const w = wiring();
   await w.directory.add({ name: "Acme" });
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor };
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
 
   for (const phrase of ["brief Acme", "brief me on Acme", "how is Acme", "what's going on with Acme", "catch me up on Acme"]) {
     const out = await runCommand(phrase, deps);
@@ -671,13 +739,13 @@ test("several phrasings reach the brief", async () => {
 
 test("an unrecognised message falls through to the model", async () => {
   const w = wiring();
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor };
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
   assert.equal(await runCommand("write a poem about roofing", deps), null);
 });
 
 test("a command that matches but fails explains itself", async () => {
   const w = wiring();
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor };
+  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
   const out = await runCommand("brief Ghost", deps);
   assert.equal(out.failed, true);
   assert.match(out.text, /No businesses set up yet/);
@@ -713,6 +781,121 @@ test("the default model is the cheapest one unless overridden", async () => {
   try {
     const res = await fetch(`http://127.0.0.1:${server.address().port}/api/status`, { headers: auth });
     assert.equal((await res.json()).model, "claude-haiku-5-5");
+  } finally {
+    server.close();
+  }
+});
+
+// ------------------------------------------------------------------ voice ---
+
+function audioResponse(calls) {
+  return async (url, init) => {
+    calls.push({ url, init });
+    if (url.endsWith("/voices")) {
+      return { ok: true, status: 200, json: async () => ({ voices: [{ voice_id: "vid-1" }] }), text: async () => "" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map([["content-type", "audio/mpeg"]]),
+      body: "AUDIO",
+      text: async () => "",
+    };
+  };
+}
+
+test("with no ElevenLabs key the browser voice is used and speaking is refused", async () => {
+  const voice = createVoice({}, noNetwork);
+  assert.equal(voice.enabled, false);
+  assert.deepEqual(voice.describe(), { provider: "browser" });
+  await assert.rejects(() => voice.speak("hello"), /No ElevenLabs key/);
+});
+
+test("speech posts to ElevenLabs with the key in a header and the fast model", async () => {
+  const calls = [];
+  const fetchImpl = audioResponse(calls);
+  // Patch headers.get, since the fake returns a Map.
+  const voice = createVoice({ ELEVENLABS_API_KEY: "xi-test", ELEVENLABS_VOICE_ID: "voice-abc" }, async (u, i) => {
+    const r = await fetchImpl(u, i);
+    return { ...r, headers: { get: (k) => r.headers?.get?.(k) ?? null } };
+  });
+
+  assert.equal(voice.enabled, true);
+  assert.deepEqual(voice.describe(), { provider: "elevenlabs", model: "eleven_flash_v2_5" });
+
+  const out = await voice.speak("Acme had two events today.");
+  assert.equal(out.contentType, "audio/mpeg");
+  assert.equal(out.body, "AUDIO");
+
+  const call = calls[0];
+  assert.match(call.url, /\/text-to-speech\/voice-abc\/stream$/);
+  assert.equal(call.init.headers["xi-api-key"], "xi-test");
+  assert.equal(JSON.parse(call.init.body).model_id, "eleven_flash_v2_5");
+  assert.equal(JSON.parse(call.init.body).text, "Acme had two events today.");
+});
+
+test("long text is capped before it is billed", async () => {
+  const calls = [];
+  const fetchImpl = audioResponse(calls);
+  const voice = createVoice({ ELEVENLABS_API_KEY: "k", ELEVENLABS_VOICE_ID: "v" }, async (u, i) => {
+    const r = await fetchImpl(u, i);
+    return { ...r, headers: { get: () => "audio/mpeg" } };
+  });
+
+  const out = await voice.speak("x".repeat(5000));
+  assert.equal(out.chars, MAX_SPEECH_CHARS);
+  assert.equal(JSON.parse(calls[0].init.body).text.length, MAX_SPEECH_CHARS);
+});
+
+test("with a key but no voice id, the first account voice is looked up once", async () => {
+  const calls = [];
+  const fetchImpl = audioResponse(calls);
+  const voice = createVoice({ ELEVENLABS_API_KEY: "k" }, async (u, i) => {
+    const r = await fetchImpl(u, i);
+    return { ...r, headers: { get: () => "audio/mpeg" } };
+  });
+
+  await voice.speak("one");
+  await voice.speak("two");
+
+  const lookups = calls.filter((c) => c.url.endsWith("/voices"));
+  assert.equal(lookups.length, 1, "the voice list must be fetched once, not per utterance");
+  assert.match(calls.at(-1).url, /\/text-to-speech\/vid-1\/stream$/);
+});
+
+test("an ElevenLabs failure surfaces instead of being swallowed", async () => {
+  const voice = createVoice({ ELEVENLABS_API_KEY: "k", ELEVENLABS_VOICE_ID: "v" }, async () => ({
+    ok: false,
+    status: 401,
+    text: async () => "invalid key",
+  }));
+  await assert.rejects(() => voice.speak("hi"), /ElevenLabs 401/);
+});
+
+test("status reports which voice is in use", async () => {
+  const w = wiring();
+  const { server } = createApp({ AGENT_TOKEN: TOKEN }, { ...w, agent: { respond: async () => ({ text: "" }) } });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/status`, { headers: auth });
+    assert.deepEqual((await res.json()).voice, { provider: "browser" });
+  } finally {
+    server.close();
+  }
+});
+
+test("the speak endpoint needs the token and reports when it is unconfigured", async () => {
+  const w = wiring();
+  const { server } = createApp({ AGENT_TOKEN: TOKEN }, { ...w, agent: { respond: async () => ({ text: "" }) } });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const noAuth = await fetch(`${base}/api/speak`, { method: "POST", body: JSON.stringify({ text: "hi" }) });
+    assert.equal(noAuth.status, 401);
+
+    const res = await fetch(`${base}/api/speak`, { method: "POST", headers: auth, body: JSON.stringify({ text: "hi" }) });
+    assert.equal(res.status, 503);
+    assert.match((await res.json()).error, /No ElevenLabs key/);
   } finally {
     server.close();
   }

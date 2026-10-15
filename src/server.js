@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
@@ -10,7 +11,8 @@ import { createConnectors } from "./connectors.js";
 import { buildTools, executorFor } from "./tools.js";
 import { createAgent } from "./agent.js";
 import { syncAll } from "./sync.js";
-import { runCommand, HELP } from "./commands.js";
+import { runCommand, suggest, HELP } from "./commands.js";
+import { createVoice } from "./voice.js";
 import { INDEX_HTML } from "./ui.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +40,7 @@ export function createApp(env = process.env, deps = {}) {
       : new LocalStore(env.STORE_FILE ?? (env.VERCEL ? "/tmp/jarvis-store.json" : join(here, "..", "data", "store.json"))));
 
   const cipher = deps.cipher ?? createCipher(env.CREDENTIALS_KEY);
+  const voice = deps.voice ?? createVoice(env);
   const directory = deps.directory ?? new Directory({ store, cipher });
   const approvals = deps.approvals ?? new ApprovalQueue(store);
 
@@ -49,13 +52,18 @@ export function createApp(env = process.env, deps = {}) {
   const tools = deps.tools ?? buildTools({ directory, approvals, connectorsFor, defaultConnectors });
   const execute = executorFor({ directory, connectorsFor, defaultConnectors });
 
-  // Without a Claude key the deterministic commands still work, so say what
-  // is possible rather than just reporting a missing key.
+  // Without a Claude key the deterministic commands still work. Point at the
+  // nearest one rather than dumping the whole list every time.
   const missingKeyAgent = {
-    respond: async () => ({
-      text: `I don't have an AI key yet, so I can't handle free-form questions. ${HELP}`,
-      toolsUsed: [],
-    }),
+    respond: async (_history, userText) => {
+      const near = suggest(userText);
+      return {
+        text: near
+          ? `I can't answer that without an AI key. Did you mean "${near}"? Say "help" for the full list.`
+          : `I can't answer free-form questions without an AI key. ${HELP}`,
+        toolsUsed: [],
+      };
+    },
   };
   const agent =
     deps.agent ??
@@ -116,6 +124,7 @@ export function createApp(env = process.env, deps = {}) {
           ...(storeError ? { storeError } : {}),
           credentialsEncryption: cipher.enabled,
           claudeKey: Boolean(env.ANTHROPIC_API_KEY),
+          voice: voice.describe().provider,
         });
       }
       if (req.method === "GET" && url.pathname === "/") {
@@ -131,6 +140,7 @@ export function createApp(env = process.env, deps = {}) {
           model: env.ANTHROPIC_MODEL ?? DEFAULT_MODEL,
           storage: store instanceof RemoteStore ? "supabase" : "local file",
           credentialsEncryption: cipher.enabled,
+          voice: voice.describe(),
           businesses: await directory.list().catch(() => []),
         });
       }
@@ -144,7 +154,7 @@ export function createApp(env = process.env, deps = {}) {
 
         // Deterministic commands run first: instant, and they cost nothing.
         // Anything they do not recognise goes to Claude.
-        const command = await runCommand(text, { directory, approvals, connectorsFor });
+        const command = await runCommand(text, { directory, approvals, connectorsFor, defaultConnectors });
         if (command) {
           return send(res, 200, { text: command.text, command: command.command, usedAI: false });
         }
@@ -154,6 +164,19 @@ export function createApp(env = process.env, deps = {}) {
         history.push({ role: "assistant", content: result.text || "(no reply)" });
         history = history.slice(-MAX_HISTORY);
         return send(res, 200, { text: result.text, toolsUsed: result.toolsUsed, usedAI: true });
+      }
+
+      // Text in, spoken audio out. Keeps the ElevenLabs key server-side.
+      if (req.method === "POST" && url.pathname === "/api/speak") {
+        const { text } = await readJson(req);
+        const { body, contentType } = await voice.speak(text);
+        res.writeHead(200, {
+          "Content-Type": contentType,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        // Piped rather than buffered, so playback starts before the clip ends.
+        return Readable.fromWeb(body).pipe(res);
       }
 
       if (req.method === "GET" && url.pathname === "/api/businesses") {
