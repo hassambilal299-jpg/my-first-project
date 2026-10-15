@@ -5,7 +5,6 @@ ENV NODE_ENV=production PORT=3000 APPROVALS_FILE=/data/approvals.json
 
 COPY package.json ./
 COPY src ./src
-COPY public ./public
 
 RUN mkdir -p /data && chown node:node /data
 USER node

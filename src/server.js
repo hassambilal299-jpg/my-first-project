@@ -1,5 +1,4 @@
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
@@ -7,6 +6,7 @@ import { ApprovalQueue, FileStore, SupabaseStore } from "./approvals.js";
 import { createConnectors } from "./connectors.js";
 import { buildTools, executorFor } from "./tools.js";
 import { createAgent } from "./agent.js";
+import { INDEX_HTML } from "./ui.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAX_BODY_BYTES = 64 * 1024;
@@ -36,7 +36,6 @@ export function createApp(env = process.env, deps = {}) {
       ? createAgent({ apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5", tools })
       : missingKeyAgent);
   const execute = executorFor(connectors);
-  const indexHtml = readFileSync(join(here, "..", "public", "index.html"));
 
   let history = [];
 
@@ -76,7 +75,7 @@ export function createApp(env = process.env, deps = {}) {
         return send(res, 200, { ok: true });
       }
       if (req.method === "GET" && url.pathname === "/") {
-        return send(res, 200, indexHtml, "text/html; charset=utf-8");
+        return send(res, 200, INDEX_HTML, "text/html; charset=utf-8");
       }
 
       // Everything below requires the token.
@@ -120,7 +119,16 @@ export function createApp(env = process.env, deps = {}) {
   return { server: createServer(handle), handle, approvals };
 }
 
-// Start only when run directly, not when imported by tests.
+// Vercel's Node runtime imports this module and calls the default export.
+// The app is built on the first request so a config error surfaces as a 500
+// with a readable message instead of killing the process at import time.
+let hosted;
+export default function handler(req, res) {
+  hosted ??= createApp(process.env);
+  return hosted.handle(req, res);
+}
+
+// Start a real listener only when run directly (local dev, Docker).
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT ?? 3000);
   const { server } = createApp(process.env);

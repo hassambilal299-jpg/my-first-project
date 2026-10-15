@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/server.js";
+import handler from "../src/server.js";
 import { ApprovalQueue, FileStore, SupabaseStore } from "../src/approvals.js";
 import { createConnectors } from "../src/connectors.js";
 import { buildTools, executorFor } from "../src/tools.js";
@@ -50,6 +51,24 @@ test("starts without an Anthropic key and says so in chat", async () => {
   } finally {
     server.close();
   }
+});
+
+test("serves the UI page without a token", async () => {
+  const app = await setup();
+  try {
+    const res = await fetch(`${app.base}/`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/html/);
+    const body = await res.text();
+    assert.match(body, /<!doctype html>/i);
+    assert.ok(body.includes('id="token"'), "page must render the unlock field");
+  } finally {
+    app.close();
+  }
+});
+
+test("exports a default handler for the Vercel runtime", () => {
+  assert.equal(typeof handler, "function");
 });
 
 test("health check needs no token", async () => {

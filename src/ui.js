@@ -1,4 +1,6 @@
-<!doctype html>
+// The single-page UI, inlined so no runtime file read is needed.
+// Vercel does not trace readFileSync paths into the function bundle.
+export const INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -199,8 +201,8 @@
   }
   async function decide(id, decision) {
     try {
-      const { item } = await api(`/api/approvals/${id}/${decision}`, { method: "POST" });
-      addLine("jarvis", `${decision === "approve" ? "Approved" : "Rejected"}: ${item.status}${item.error ? " (" + item.error + ")" : ""}`);
+      const { item } = await api(\`/api/approvals/\${id}/\${decision}\`, { method: "POST" });
+      addLine("jarvis", \`\${decision === "approve" ? "Approved" : "Rejected"}: \${item.status}\${item.error ? " (" + item.error + ")" : ""}\`);
     } catch (err) {
       addLine("jarvis", "Error: " + err.message);
     }
@@ -212,7 +214,7 @@
     try {
       const { connectors } = await api("/api/status");
       $("status").textContent = Object.entries(connectors)
-        .map(([name, on]) => `${name}: ${on ? "connected" : "mock mode"}`)
+        .map(([name, on]) => \`\${name}: \${on ? "connected" : "mock mode"}\`)
         .join(" · ");
     } catch (_) {}
   }
@@ -232,3 +234,4 @@
 </script>
 </body>
 </html>
+`;
