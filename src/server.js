@@ -2,10 +2,14 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
-import { ApprovalQueue, FileStore, SupabaseStore } from "./approvals.js";
+import { ApprovalQueue } from "./approvals.js";
+import { RemoteStore, LocalStore } from "./store.js";
+import { Directory, narrateBrief } from "./businesses.js";
+import { createCipher } from "./crypto.js";
 import { createConnectors } from "./connectors.js";
 import { buildTools, executorFor } from "./tools.js";
 import { createAgent } from "./agent.js";
+import { syncAll } from "./sync.js";
 import { INDEX_HTML } from "./ui.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -18,24 +22,40 @@ export function createApp(env = process.env, deps = {}) {
     throw new Error("AGENT_TOKEN must be set and at least 16 characters. Refusing to start without it.");
   }
 
-  const approvals =
-    deps.approvals ??
-    new ApprovalQueue(
-      env.SUPABASE_URL && env.SUPABASE_SECRET_KEY
-        ? new SupabaseStore({ url: env.SUPABASE_URL, key: env.SUPABASE_SECRET_KEY })
-        : new FileStore(env.APPROVALS_FILE ?? (env.VERCEL ? "/tmp/approvals.json" : join(here, "..", "data", "approvals.json"))),
-    );
-  const connectors = deps.connectors ?? createConnectors(env);
-  const tools = buildTools({ connectors, approvals });
+  // Supabase in production; a JSON file locally. Both expose the same ops.
+  const store =
+    deps.store ??
+    (env.SUPABASE_STORE_URL && env.SUPABASE_API_KEY
+      ? new RemoteStore({
+          url: env.SUPABASE_STORE_URL,
+          apiKey: env.SUPABASE_API_KEY,
+          storeToken: env.JARVIS_STORE_TOKEN,
+        })
+      : new LocalStore(env.STORE_FILE ?? (env.VERCEL ? "/tmp/jarvis-store.json" : join(here, "..", "data", "store.json"))));
+
+  const cipher = deps.cipher ?? createCipher(env.CREDENTIALS_KEY);
+  const directory = deps.directory ?? new Directory({ store, cipher });
+  const approvals = deps.approvals ?? new ApprovalQueue(store);
+
+  // Env vars act as the default credential set (the owner's own accounts);
+  // a business's stored credentials override them.
+  const connectorsFor = deps.connectorsFor ?? ((credentials) => createConnectors({ ...env, ...credentials }));
+  const defaultConnectors = deps.defaultConnectors ?? connectorsFor({});
+
+  const tools = deps.tools ?? buildTools({ directory, approvals, connectorsFor, defaultConnectors });
+  const execute = executorFor({ directory, connectorsFor, defaultConnectors });
+
   const missingKeyAgent = {
-    respond: async () => ({ text: "The Claude API key isn't set on the server yet. Ask the owner to add ANTHROPIC_API_KEY.", toolsUsed: [] }),
+    respond: async () => ({
+      text: "The Claude API key isn't set on the server yet. Ask the owner to add ANTHROPIC_API_KEY.",
+      toolsUsed: [],
+    }),
   };
   const agent =
     deps.agent ??
     (env.ANTHROPIC_API_KEY
       ? createAgent({ apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5", tools })
       : missingKeyAgent);
-  const execute = executorFor(connectors);
 
   let history = [];
 
@@ -71,8 +91,26 @@ export function createApp(env = process.env, deps = {}) {
     try {
       const url = new URL(req.url, "http://localhost");
 
+      // Readiness probe. Reports whether the datastore answers, without
+      // exposing any of its contents, so a deploy can be verified end to end.
       if (req.method === "GET" && url.pathname === "/healthz") {
-        return send(res, 200, { ok: true });
+        const storage = store instanceof RemoteStore ? "supabase" : "local file";
+        let storeReachable = false;
+        let storeError;
+        try {
+          await store.call("businesses.list");
+          storeReachable = true;
+        } catch (err) {
+          storeError = err.message;
+        }
+        return send(res, 200, {
+          ok: true,
+          storage,
+          storeReachable,
+          ...(storeError ? { storeError } : {}),
+          credentialsEncryption: cipher.enabled,
+          claudeKey: Boolean(env.ANTHROPIC_API_KEY),
+        });
       }
       if (req.method === "GET" && url.pathname === "/") {
         return send(res, 200, INDEX_HTML, "text/html; charset=utf-8");
@@ -82,7 +120,13 @@ export function createApp(env = process.env, deps = {}) {
       if (!authorized(req)) return send(res, 401, { error: "Unauthorized" });
 
       if (req.method === "GET" && url.pathname === "/api/status") {
-        return send(res, 200, { connectors: connectors.status(), model: env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5" });
+        return send(res, 200, {
+          connectors: defaultConnectors.status(),
+          model: env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5",
+          storage: store instanceof RemoteStore ? "supabase" : "local file",
+          credentialsEncryption: cipher.enabled,
+          businesses: await directory.list().catch(() => []),
+        });
       }
 
       if (req.method === "POST" && url.pathname === "/api/chat") {
@@ -97,26 +141,82 @@ export function createApp(env = process.env, deps = {}) {
         return send(res, 200, { text: result.text, toolsUsed: result.toolsUsed });
       }
 
+      if (req.method === "GET" && url.pathname === "/api/businesses") {
+        return send(res, 200, { businesses: await directory.list() });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/businesses") {
+        const { name, kind } = await readJson(req);
+        if (!name || typeof name !== "string") return send(res, 400, { error: "name is required" });
+        return send(res, 200, { business: await directory.add({ name, kind }) });
+      }
+
+      // Store a business's connector credentials, encrypted.
+      if (req.method === "POST" && url.pathname === "/api/credentials") {
+        const { business, credentials } = await readJson(req);
+        if (!business || !credentials || typeof credentials !== "object") {
+          return send(res, 400, { error: "business and credentials are required" });
+        }
+        if (!cipher.enabled) {
+          return send(res, 400, { error: "CREDENTIALS_KEY is not set, so credentials cannot be stored." });
+        }
+        return send(res, 200, await directory.setCredentials(business, credentials));
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/brief") {
+        const name = url.searchParams.get("business");
+        const hours = Number(url.searchParams.get("hours") ?? 24);
+        if (!name) return send(res, 400, { error: "business is required" });
+        const since = new Date(Date.now() - Math.min(Math.max(hours, 1), 720) * 3600000).toISOString();
+        const brief = await directory.brief(name, since);
+        return send(res, 200, { spoken: narrateBrief(brief), ...brief });
+      }
+
+      // The scheduled sweep. Reads every business's connectors and records what
+      // is new, so briefs are current without anyone asking.
+      if (req.method === "POST" && url.pathname === "/api/sync") {
+        return send(res, 200, await syncAll({ directory, connectorsFor }));
+      }
+
       if (req.method === "GET" && url.pathname === "/api/approvals") {
-        return send(res, 200, { items: await approvals.list(url.searchParams.get("status") ?? undefined) });
+        const business = url.searchParams.get("business");
+        const resolved = business ? await directory.resolve(business) : null;
+        return send(res, 200, {
+          items: await approvals.list(url.searchParams.get("status") ?? undefined, resolved?.id),
+        });
       }
 
       const match = url.pathname.match(/^\/api\/approvals\/([^/]+)\/(approve|reject)$/);
       if (req.method === "POST" && match) {
         const [, id, decision] = match;
         const item = await approvals.decide(id, decision === "approve" ? "approve" : "reject", execute);
+        // An approved action is itself something that happened in the business.
+        if (item.businessId && item.status === "approved") {
+          await directory
+            .record({
+              businessId: item.businessId,
+              source: "agent",
+              kind: `${item.action}.sent`,
+              summary: `Approved and ran: ${item.summary}`,
+              detail: {},
+            })
+            .catch(() => {});
+        }
         return send(res, 200, { item });
       }
 
       return send(res, 404, { error: "Not found" });
     } catch (err) {
-      const status = err.status ?? (err.message?.includes("No approval item") ? 404 : 500);
+      // Errors tagged with a status (or raised by the approval queue for a
+      // missing item) are the caller's to fix, so pass the message through.
+      // Anything else is ours: log it and stay vague to the client.
+      const status = err.status ?? (/^No approval item/.test(err.message ?? "") ? 404 : 500);
       if (status === 500) console.error(err);
       return send(res, status, { error: status === 500 ? "Internal error" : err.message });
     }
   };
 
-  return { server: createServer(handle), handle, approvals };
+  return { server: createServer(handle), handle, approvals, directory, store };
 }
 
 // Vercel's Node runtime imports this module and calls the default export.

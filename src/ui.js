@@ -1,5 +1,5 @@
-// The single-page UI, inlined so no runtime file read is needed.
-// Vercel does not trace readFileSync paths into the function bundle.
+// GENERATED FILE - do not edit.
+// Source: public/index.html. Regenerate with: npm run build:ui
 export const INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -21,6 +21,7 @@ export const INDEX_HTML = `<!doctype html>
     .you { color: var(--accent); }
     .muted { color: var(--muted); font-size: 14px; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    select { padding: 10px; border-radius: 10px; border: 1px solid var(--muted); background: var(--panel); color: var(--text); font: inherit; min-height: 44px; flex: 1; min-width: 160px; }
     input[type=text], input[type=password] { flex: 1; min-width: 160px; padding: 10px; border-radius: 10px; border: 1px solid var(--muted); background: transparent; color: var(--text); font: inherit; }
     button { padding: 10px 14px; border-radius: 10px; border: 0; background: var(--accent); color: #000; font: inherit; font-weight: 600; cursor: pointer; min-height: 44px; }
     button.secondary { background: transparent; color: var(--text); border: 1px solid var(--muted); }
@@ -41,6 +42,20 @@ export const INDEX_HTML = `<!doctype html>
       <button id="saveToken">Unlock</button>
     </div>
     <p class="muted">Token is stored in this browser only. Ask the owner for it if you don't have it.</p>
+  </section>
+
+  <section class="panel" id="businessPanel" hidden>
+    <div class="row">
+      <select id="business" aria-label="Business">
+        <option value="">My own accounts</option>
+      </select>
+      <button id="briefBtn">Brief me</button>
+      <button class="secondary" id="syncBtn">Sync now</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="newBusiness" placeholder="Add a business by name" aria-label="New business name">
+      <button class="secondary" id="addBusiness">Add</button>
+    </div>
   </section>
 
   <section class="panel" id="appPanel" hidden>
@@ -90,6 +105,7 @@ export const INDEX_HTML = `<!doctype html>
     token = null;
     try { localStorage.removeItem(storageKey); } catch (_) {}
     $("authPanel").hidden = false;
+    $("businessPanel").hidden = true;
     $("appPanel").hidden = true;
     $("approvalsPanel").hidden = true;
     $("statusPanel").hidden = true;
@@ -97,10 +113,12 @@ export const INDEX_HTML = `<!doctype html>
 
   function unlock() {
     $("authPanel").hidden = true;
+    $("businessPanel").hidden = false;
     $("appPanel").hidden = false;
     $("approvalsPanel").hidden = false;
     $("statusPanel").hidden = false;
     loadStatus();
+    loadBusinesses();
     loadApprovals();
     addLine("jarvis", "Ready. What do you need?");
   }
@@ -218,6 +236,70 @@ export const INDEX_HTML = `<!doctype html>
         .join(" · ");
     } catch (_) {}
   }
+
+  // ----- Businesses, briefs, sync -----
+  async function loadBusinesses() {
+    try {
+      const { businesses } = await api("/api/businesses");
+      const select = $("business");
+      const chosen = select.value;
+      select.textContent = "";
+      select.append(Object.assign(document.createElement("option"), { value: "", textContent: "My own accounts" }));
+      for (const b of businesses) {
+        select.append(Object.assign(document.createElement("option"), { value: b.name, textContent: b.name }));
+      }
+      if (chosen) select.value = chosen;
+    } catch (err) {
+      addLine("jarvis", "Could not load businesses: " + err.message);
+    }
+  }
+
+  $("addBusiness").onclick = async () => {
+    const name = $("newBusiness").value.trim();
+    if (!name) return;
+    try {
+      await api("/api/businesses", { method: "POST", body: JSON.stringify({ name }) });
+      $("newBusiness").value = "";
+      await loadBusinesses();
+      $("business").value = name;
+      addLine("jarvis", "Added " + name + ".");
+    } catch (err) {
+      addLine("jarvis", "Error: " + err.message);
+    }
+  };
+
+  $("briefBtn").onclick = async () => {
+    const name = $("business").value;
+    if (!name) { addLine("jarvis", "Pick a business first, or just ask me in chat."); return; }
+    $("briefBtn").disabled = true;
+    try {
+      const brief = await api("/api/brief?business=" + encodeURIComponent(name) + "&hours=24");
+      addLine("jarvis", brief.spoken);
+      speak(brief.spoken);
+      loadApprovals();
+    } catch (err) {
+      addLine("jarvis", "Error: " + err.message);
+    } finally {
+      $("briefBtn").disabled = false;
+    }
+  };
+
+  $("syncBtn").onclick = async () => {
+    $("syncBtn").disabled = true;
+    addLine("jarvis", "Syncing…");
+    try {
+      const out = await api("/api/sync", { method: "POST" });
+      const recorded = out.reports.reduce((n, r) => n + r.recorded, 0);
+      const notConnected = [...new Set(out.reports.flatMap((r) => r.notConnected))];
+      let msg = "Synced " + out.businesses + " business(es). " + recorded + " new event(s).";
+      if (notConnected.length) msg += " Not connected yet: " + notConnected.join(", ") + ".";
+      addLine("jarvis", msg);
+    } catch (err) {
+      addLine("jarvis", "Error: " + err.message);
+    } finally {
+      $("syncBtn").disabled = false;
+    }
+  };
 
   // ----- Unlock -----
   $("saveToken").onclick = () => {

@@ -40,7 +40,7 @@ export function createConnectors(env = process.env, fetchImpl = fetch) {
           mock: true,
           note: "Gmail not connected",
           messages: [
-            { from: "client@example.com", subject: "Quick question on the proposal", snippet: "Can we move the call to Thursday?" },
+            { id: "mock-1", from: "client@example.com", subject: "Quick question on the proposal", snippet: "Can we move the call to Thursday?" },
           ].slice(0, limit),
         };
       }

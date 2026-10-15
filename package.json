@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/app.test.js"
+    "build:ui": "node scripts/build-ui.mjs",
+    "test": "node --test test/*.test.js"
   }
 }
