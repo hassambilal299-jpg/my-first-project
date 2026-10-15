@@ -40,8 +40,20 @@ test("refuses to start with a weak or missing token", () => {
   assert.throws(() => createApp({ ANTHROPIC_API_KEY: "x" }), /AGENT_TOKEN/);
 });
 
-test("refuses to start without an Anthropic key", () => {
-  assert.throws(() => createApp({ AGENT_TOKEN: TOKEN }), /ANTHROPIC_API_KEY/);
+test("starts without an Anthropic key and says so in chat", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jarvis-test-"));
+  const { server } = createApp({ AGENT_TOKEN: TOKEN, APPROVALS_FILE: join(dir, "a.json") });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/chat`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ message: "hi" }),
+    });
+    assert.match((await res.json()).text, /API key/);
+  } finally {
+    server.close();
+  }
 });
 
 test("health check needs no token", async () => {

@@ -17,17 +17,19 @@ export function createApp(env = process.env, deps = {}) {
   if (!token || token.length < 16) {
     throw new Error("AGENT_TOKEN must be set and at least 16 characters. Refusing to start without it.");
   }
-  if (!env.ANTHROPIC_API_KEY && !deps.agent) {
-    throw new Error("ANTHROPIC_API_KEY must be set.");
-  }
 
   const defaultApprovals = env.VERCEL ? "/tmp/approvals.json" : join(here, "..", "data", "approvals.json");
   const approvals = deps.approvals ?? new ApprovalQueue(env.APPROVALS_FILE ?? defaultApprovals);
   const connectors = deps.connectors ?? createConnectors(env);
   const tools = buildTools({ connectors, approvals });
+  const missingKeyAgent = {
+    respond: async () => ({ text: "The Claude API key isn't set on the server yet. Ask the owner to add ANTHROPIC_API_KEY.", toolsUsed: [] }),
+  };
   const agent =
     deps.agent ??
-    createAgent({ apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5", tools });
+    (env.ANTHROPIC_API_KEY
+      ? createAgent({ apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5", tools })
+      : missingKeyAgent);
   const execute = executorFor(connectors);
   const indexHtml = readFileSync(join(here, "..", "public", "index.html"));
 
