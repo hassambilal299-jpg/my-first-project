@@ -154,7 +154,13 @@ export function createApp(env = process.env, deps = {}) {
 
         // Deterministic commands run first: instant, and they cost nothing.
         // Anything they do not recognise goes to Claude.
-        const command = await runCommand(text, { directory, approvals, connectorsFor, defaultConnectors });
+        const command = await runCommand(text, {
+          directory,
+          approvals,
+          connectorsFactory: connectorsFor,
+          defaultConnectors,
+          execute,
+        });
         if (command) {
           return send(res, 200, { text: command.text, command: command.command, usedAI: false });
         }

@@ -13,7 +13,7 @@ import { createConnectors } from "../src/connectors.js";
 import { buildTools, executorFor } from "../src/tools.js";
 import { createAgent } from "../src/agent.js";
 import { syncBusiness, syncAll } from "../src/sync.js";
-import { runCommand, suggest } from "../src/commands.js";
+import { runCommand, suggest, parseWindow } from "../src/commands.js";
 import { createVoice, MAX_SPEECH_CHARS } from "../src/voice.js";
 
 const TOKEN = "test-token-1234567890";
@@ -47,6 +47,15 @@ function setup({ agentReply, env = {} } = {}) {
 }
 
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+
+// What the server hands to runCommand.
+const cmdDeps = (w) => ({
+  directory: w.directory,
+  approvals: w.approvals,
+  connectorsFactory: w.connectorsFor,
+  defaultConnectors: w.defaultConnectors,
+  execute: executorFor(w),
+});
 
 // ---------------------------------------------------------------- startup ---
 
@@ -642,7 +651,7 @@ test("commands run with no AI key and no network", async () => {
   const w = wiring();
   await w.directory.add({ name: "Acme" });
 
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+  const deps = cmdDeps(w);
 
   const help = await runCommand("help", deps);
   assert.match(help.text, /brief/);
@@ -669,7 +678,7 @@ test("commands run with no AI key and no network", async () => {
 
 test("a greeting, status, and an all-business brief work with no AI", async () => {
   const w = wiring();
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+  const deps = cmdDeps(w);
 
   const empty = await runCommand("hello", deps);
   assert.match(empty.text, /No businesses set up yet/);
@@ -700,7 +709,7 @@ test("a greeting, status, and an all-business brief work with no AI", async () =
 
 test("the all-business brief counts what is waiting for approval", async () => {
   const w = wiring();
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+  const deps = cmdDeps(w);
   const acme = await w.directory.add({ name: "Acme" });
   await w.approvals.propose({ action: "send_sms", businessId: acme.id, summary: "SMS to c1", payload: {} });
 
@@ -712,12 +721,166 @@ test("the all-business brief counts what is waiting for approval", async () => {
 test("roll-up phrasings do not get mistaken for a business name", async () => {
   const w = wiring();
   await w.directory.add({ name: "Acme" });
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+  const deps = cmdDeps(w);
 
   for (const phrase of ["brief me", "brief", "catch me up", "what's happening", "whats new", "update me", "summary"]) {
     const out = await runCommand(phrase, deps);
     assert.equal(out?.command, "brief_all", `"${phrase}" should roll up, not resolve a business`);
   }
+});
+
+test("a dictated text is drafted, never sent, and goes through approval", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  await w.directory.add({ name: "Acme" });
+
+  const drafted = await runCommand("text c1 for acme saying running ten minutes late", deps);
+  assert.equal(drafted.command, "draft_sms");
+  assert.match(drafted.text, /Drafted, not sent/);
+
+  const pendingItems = await w.approvals.list("pending");
+  assert.equal(pendingItems.length, 1);
+  assert.equal(pendingItems[0].payload.message, "running ten minutes late");
+  assert.equal(pendingItems[0].payload.contactId, "c1");
+  assert.equal(pendingItems[0].status, "pending", "dictating must not send");
+});
+
+test("a dictated post names its platforms and maps twitter to x", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+
+  const out = await runCommand("post to linkedin, twitter saying we are hiring", deps);
+  assert.equal(out.command, "draft_post");
+  const [item] = await w.approvals.list("pending");
+  assert.deepEqual(item.payload.platforms, ["linkedin", "x"]);
+  assert.equal(item.payload.text, "we are hiring");
+});
+
+test("an unknown platform is reported rather than guessed", async () => {
+  const w = wiring();
+  const out = await runCommand("post to myspace saying hello", cmdDeps(w));
+  assert.match(out.text, /do not know myspace/);
+  assert.equal((await w.approvals.list("pending")).length, 0, "nothing should be queued");
+});
+
+test("approving by number runs it, and the reply names what happened", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  await w.directory.add({ name: "Acme" });
+  await runCommand("text c1 for acme saying first", deps);
+  await runCommand("text c2 for acme saying second", deps);
+
+  const listed = await runCommand("pending", deps);
+  assert.match(listed.text, /1\. /);
+  assert.match(listed.text, /2\. /);
+
+  const approved = await runCommand("approve 2", deps);
+  assert.match(approved.text, /Approved 1/);
+  assert.match(approved.text, /second/, "must say which one it acted on");
+
+  const left = await w.approvals.list("pending");
+  assert.equal(left.length, 1);
+  assert.equal(left[0].payload.message, "first");
+});
+
+test("rejecting by number never runs the action", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  await runCommand("text c1 saying hello", deps);
+
+  const out = await runCommand("reject 1", deps);
+  assert.match(out.text, /Rejected 1/);
+  const [item] = await w.approvals.list();
+  assert.equal(item.status, "rejected");
+  assert.equal(item.result, undefined);
+});
+
+test("approve all clears the queue and reports each item", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  await runCommand("text c1 saying one", deps);
+  await runCommand("text c2 saying two", deps);
+
+  const out = await runCommand("approve all", deps);
+  assert.match(out.text, /Approved 2/);
+  assert.equal((await w.approvals.list("pending")).length, 0);
+});
+
+test("a number with nothing behind it is reported, not silently ignored", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  assert.match((await runCommand("approve 3", deps)).text, /Nothing is waiting/);
+
+  await runCommand("text c1 saying hello", deps);
+  assert.match((await runCommand("approve 9", deps)).text, /no number 9/);
+  assert.equal((await w.approvals.list("pending")).length, 1, "the real item must survive");
+});
+
+test("approving a business action records it as an event", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  await w.directory.add({ name: "Acme" });
+  await runCommand("text c1 for acme saying hello", deps);
+  await runCommand("approve 1", deps);
+
+  const brief = await w.directory.brief("Acme");
+  assert.match(brief.events[0].summary, /Approved and ran/);
+});
+
+test("time windows are parsed off the end of a brief", () => {
+  assert.deepEqual(parseWindow("brief acme last week"), { rest: "brief acme", hours: 168 });
+  assert.deepEqual(parseWindow("brief acme last 3 days"), { rest: "brief acme", hours: 72 });
+  assert.deepEqual(parseWindow("brief acme past 6 hours"), { rest: "brief acme", hours: 6 });
+  assert.deepEqual(parseWindow("brief me today"), { rest: "brief me", hours: 24 });
+  assert.deepEqual(parseWindow("brief acme"), { rest: "brief acme", hours: 24 });
+  assert.equal(parseWindow("brief acme last 9999 days").hours, 720, "clamped");
+});
+
+test("a brief honours a spoken time window", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  const acme = await w.directory.add({ name: "Acme" });
+  await w.directory.record({ businessId: acme.id, source: "manual", kind: "note", summary: "recent" });
+
+  const week = await runCommand("brief acme last week", deps);
+  assert.equal(week.command, "brief");
+  assert.match(week.text, /recent/);
+
+  const rollup = await runCommand("brief me last 7 days", deps);
+  assert.equal(rollup.command, "brief_all");
+  assert.match(rollup.text, /last 168 hours/);
+});
+
+test("emails and orders say plainly when nothing is connected", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  assert.match((await runCommand("emails", deps)).text, /Gmail is not connected/);
+  assert.match((await runCommand("orders", deps)).text, /Shopify is not connected/);
+});
+
+test("orders read the named business's own credentials", async () => {
+  const seen = [];
+  const w = wiring({
+    env: { SHOPIFY_ACCESS_TOKEN: "app-default", SHOPIFY_STORE_DOMAIN: "d.myshopify.com" },
+    fetchImpl: async (url, init) => {
+      seen.push(init.headers["X-Shopify-Access-Token"]);
+      return { ok: true, status: 200, json: async () => ({ orders: [{ id: 1, name: "#1", total_price: "9.99" }] }), text: async () => "" };
+    },
+  });
+  await w.directory.add({ name: "Acme" });
+  await w.directory.setCredentials("Acme", { SHOPIFY_ACCESS_TOKEN: "acme-token" });
+
+  const out = await runCommand("orders for acme", cmdDeps(w));
+  assert.match(out.text, /#1 for 9.99/);
+  assert.deepEqual(seen, ["acme-token"]);
+});
+
+test("syncing one business by name works", async () => {
+  const w = wiring();
+  await w.directory.add({ name: "Acme" });
+  const out = await runCommand("sync acme", cmdDeps(w));
+  assert.equal(out.command, "sync_one");
+  assert.match(out.text, /Acme: 0 new events/);
 });
 
 test("suggest points at the nearest command", () => {
@@ -729,7 +892,7 @@ test("suggest points at the nearest command", () => {
 test("several phrasings reach the brief", async () => {
   const w = wiring();
   await w.directory.add({ name: "Acme" });
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+  const deps = cmdDeps(w);
 
   for (const phrase of ["brief Acme", "brief me on Acme", "how is Acme", "what's going on with Acme", "catch me up on Acme"]) {
     const out = await runCommand(phrase, deps);
@@ -739,13 +902,13 @@ test("several phrasings reach the brief", async () => {
 
 test("an unrecognised message falls through to the model", async () => {
   const w = wiring();
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+  const deps = cmdDeps(w);
   assert.equal(await runCommand("write a poem about roofing", deps), null);
 });
 
 test("a command that matches but fails explains itself", async () => {
   const w = wiring();
-  const deps = { directory: w.directory, approvals: w.approvals, connectorsFor: w.connectorsFor, defaultConnectors: w.defaultConnectors };
+  const deps = cmdDeps(w);
   const out = await runCommand("brief Ghost", deps);
   assert.equal(out.failed, true);
   assert.match(out.text, /No businesses set up yet/);

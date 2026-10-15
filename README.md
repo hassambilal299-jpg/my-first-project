@@ -55,9 +55,22 @@ Three ideas carry the whole design:
 
 The app is split so that **the expensive part is optional**.
 
-**Free, no API key, no credit:** briefs, the sweep, approvals, notes, adding
-businesses. All of it is computed from the database, so it costs nothing to run.
-Reached by voice or typing through command mode — say `help` to list it.
+**Free, no API key, no credit** — by voice or typing, say `help` for the list:
+
+| Say | What happens |
+|---|---|
+| `brief me`, `brief acme`, `brief acme last week` | Roll-up, or one business, over any window up to 30 days |
+| `sync`, `sync acme` | Read connected accounts and record what is new |
+| `pending` | Numbered list of what is waiting |
+| `approve 1`, `reject 2`, `approve all` | Decide by voice; the reply names what it acted on |
+| `text c1 saying running late` | Drafts an SMS — **queued, not sent** |
+| `post to linkedin saying we are hiring` | Drafts a post — **queued, not published** |
+| `note acme client called about pricing` | Records something into the history |
+| `emails`, `orders for acme` | Read straight from the connector |
+| `businesses`, `add business acme`, `status` | Manage and inspect |
+
+None of that calls a model. Dictated texts and posts use **your** words, so no
+generation is needed — and they still go through the approval gate.
 
 **Paid, only for free-form conversation:** anything command mode does not
 recognise goes to Claude. Default model is `claude-haiku-5-5` at $0.10 per
@@ -117,7 +130,7 @@ better than a brief full of invented activity.
 ```bash
 cp .env.example .env     # fill in AGENT_TOKEN and ANTHROPIC_API_KEY
 npm start                # http://localhost:3000
-npm test                 # 52 tests, no network needed
+npm test                 # 76 tests, no network needed
 npm run build:ui         # after editing public/index.html
 ```
 

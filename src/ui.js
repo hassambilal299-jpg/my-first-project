@@ -120,7 +120,7 @@ export const INDEX_HTML = `<!doctype html>
     loadStatus();
     loadBusinesses();
     loadApprovals();
-    addLine("jarvis", "Ready. Say or type \\u201chelp\\u201d to see what works without any AI cost.");
+    addLine("jarvis", "Ready. Everything works without AI cost \\u2014 say or type \\u201chelp\\u201d for the list.");
   }
 
   // Tag replies that cost nothing, so AI spend stays visible.
