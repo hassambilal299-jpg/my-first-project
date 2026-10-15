@@ -21,7 +21,8 @@ export function createApp(env = process.env, deps = {}) {
     throw new Error("ANTHROPIC_API_KEY must be set.");
   }
 
-  const approvals = deps.approvals ?? new ApprovalQueue(env.APPROVALS_FILE ?? join(here, "..", "data", "approvals.json"));
+  const defaultApprovals = env.VERCEL ? "/tmp/approvals.json" : join(here, "..", "data", "approvals.json");
+  const approvals = deps.approvals ?? new ApprovalQueue(env.APPROVALS_FILE ?? defaultApprovals);
   const connectors = deps.connectors ?? createConnectors(env);
   const tools = buildTools({ connectors, approvals });
   const agent =
@@ -60,7 +61,7 @@ export function createApp(env = process.env, deps = {}) {
     return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
   }
 
-  const server = createServer(async (req, res) => {
+  const handle = async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
 
@@ -107,9 +108,9 @@ export function createApp(env = process.env, deps = {}) {
       if (status === 500) console.error(err);
       return send(res, status, { error: status === 500 ? "Internal error" : err.message });
     }
-  });
+  };
 
-  return { server, approvals };
+  return { server: createServer(handle), handle, approvals };
 }
 
 // Start only when run directly, not when imported by tests.
