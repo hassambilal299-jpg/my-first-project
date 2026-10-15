@@ -4,16 +4,16 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/server.js";
-import { ApprovalQueue } from "../src/approvals.js";
+import { ApprovalQueue, FileStore, SupabaseStore } from "../src/approvals.js";
 import { createConnectors } from "../src/connectors.js";
 import { buildTools, executorFor } from "../src/tools.js";
 import { createAgent } from "../src/agent.js";
 
 const TOKEN = "test-token-1234567890";
+const tmpFile = (name = "approvals.json") => join(mkdtempSync(join(tmpdir(), "jarvis-test-")), name);
 
 function setup({ agentReply } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "jarvis-test-"));
-  const approvals = new ApprovalQueue(join(dir, "approvals.json"));
+  const approvals = new ApprovalQueue(new FileStore(tmpFile()));
   const connectors = createConnectors({}, async () => {
     throw new Error("network should not be called in mock mode");
   });
@@ -21,10 +21,7 @@ function setup({ agentReply } = {}) {
   const agent = {
     respond: async (_history, text) => ({ text: agentReply ?? `echo: ${text}`, toolsUsed: [] }),
   };
-  const { server } = createApp(
-    { AGENT_TOKEN: TOKEN, ANTHROPIC_API_KEY: "x", APPROVALS_FILE: join(dir, "approvals.json") },
-    { approvals, connectors, agent, tools },
-  );
+  const { server } = createApp({ AGENT_TOKEN: TOKEN }, { approvals, connectors, agent, tools });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const base = `http://127.0.0.1:${server.address().port}`;
@@ -36,13 +33,12 @@ function setup({ agentReply } = {}) {
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
 
 test("refuses to start with a weak or missing token", () => {
-  assert.throws(() => createApp({ AGENT_TOKEN: "short", ANTHROPIC_API_KEY: "x" }), /AGENT_TOKEN/);
-  assert.throws(() => createApp({ ANTHROPIC_API_KEY: "x" }), /AGENT_TOKEN/);
+  assert.throws(() => createApp({ AGENT_TOKEN: "short" }), /AGENT_TOKEN/);
+  assert.throws(() => createApp({}), /AGENT_TOKEN/);
 });
 
 test("starts without an Anthropic key and says so in chat", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "jarvis-test-"));
-  const { server } = createApp({ AGENT_TOKEN: TOKEN, APPROVALS_FILE: join(dir, "a.json") });
+  const { server } = createApp({ AGENT_TOKEN: TOKEN, APPROVALS_FILE: tmpFile() });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const res = await fetch(`http://127.0.0.1:${server.address().port}/api/chat`, {
@@ -59,8 +55,7 @@ test("starts without an Anthropic key and says so in chat", async () => {
 test("health check needs no token", async () => {
   const app = await setup();
   try {
-    const res = await fetch(`${app.base}/healthz`);
-    assert.equal(res.status, 200);
+    assert.equal((await fetch(`${app.base}/healthz`)).status, 200);
   } finally {
     app.close();
   }
@@ -110,10 +105,10 @@ test("send_sms is queued, not sent, until approved", async () => {
     const tools = buildTools({ connectors: app.connectors, approvals: app.approvals });
     const out = await tools.call("propose_sms", { contactId: "c1", message: "Hi" });
     assert.equal(out.status, "pending");
-    assert.equal(app.approvals.list("pending").length, 1);
+    assert.equal((await app.approvals.list("pending")).length, 1);
 
-    const approve = await fetch(`${app.base}/api/approvals/${out.id}/approve`, { method: "POST", headers: auth });
-    const body = await approve.json();
+    const res = await fetch(`${app.base}/api/approvals/${out.id}/approve`, { method: "POST", headers: auth });
+    const body = await res.json();
     assert.equal(body.item.status, "approved");
     assert.equal(body.item.result.mock, true, "mock mode must not hit the network");
   } finally {
@@ -124,7 +119,7 @@ test("send_sms is queued, not sent, until approved", async () => {
 test("rejecting an approval never runs the action", async () => {
   const app = await setup();
   try {
-    const item = app.approvals.propose({ action: "send_sms", summary: "x", payload: {} });
+    const item = await app.approvals.propose({ action: "send_sms", summary: "x", payload: {} });
     const res = await fetch(`${app.base}/api/approvals/${item.id}/reject`, { method: "POST", headers: auth });
     const body = await res.json();
     assert.equal(body.item.status, "rejected");
@@ -135,17 +130,15 @@ test("rejecting an approval never runs the action", async () => {
 });
 
 test("an item can only be decided once", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "jarvis-test-"));
-  const queue = new ApprovalQueue(join(dir, "a.json"));
-  const item = queue.propose({ action: "send_sms", summary: "x", payload: {} });
+  const queue = new ApprovalQueue(new FileStore(tmpFile()));
+  const item = await queue.propose({ action: "send_sms", summary: "x", payload: {} });
   await queue.decide(item.id, "reject");
   await assert.rejects(() => queue.decide(item.id, "approve", async () => ({})), /already rejected/);
 });
 
 test("a failing side effect marks the item failed, not approved", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "jarvis-test-"));
-  const queue = new ApprovalQueue(join(dir, "a.json"));
-  const item = queue.propose({ action: "publish_post", summary: "x", payload: {} });
+  const queue = new ApprovalQueue(new FileStore(tmpFile()));
+  const item = await queue.propose({ action: "publish_post", summary: "x", payload: {} });
   const done = await queue.decide(item.id, "approve", async () => {
     throw new Error("provider down");
   });
@@ -153,11 +146,43 @@ test("a failing side effect marks the item failed, not approved", async () => {
   assert.equal(done.error, "provider down");
 });
 
-test("approval queue persists across restarts", () => {
-  const dir = mkdtempSync(join(tmpdir(), "jarvis-test-"));
-  const file = join(dir, "a.json");
-  new ApprovalQueue(file).propose({ action: "send_sms", summary: "keep me", payload: {} });
-  assert.equal(new ApprovalQueue(file).list("pending")[0].summary, "keep me");
+test("file approval queue persists across restarts", async () => {
+  const file = tmpFile();
+  await new ApprovalQueue(new FileStore(file)).propose({ action: "send_sms", summary: "keep me", payload: {} });
+  const [item] = await new ApprovalQueue(new FileStore(file)).list("pending");
+  assert.equal(item.summary, "keep me");
+});
+
+test("Supabase store sends approvals to the approvals table with the secret key", async () => {
+  const requests = [];
+  const row = (over = {}) => ({
+    id: "11111111-1111-1111-1111-111111111111",
+    action: "send_sms",
+    summary: "SMS to c1",
+    payload: { contactId: "c1" },
+    status: "pending",
+    result: null,
+    error: null,
+    created_at: "2026-10-15T00:00:00Z",
+    decided_at: null,
+    ...over,
+  });
+  const fakeFetch = async (url, init) => {
+    requests.push({ url, init });
+    const body = init.method === "GET" ? [] : [row(init.method === "PATCH" ? { status: "rejected" } : {})];
+    return { ok: true, status: 200, json: async () => (init.method === "GET" && url.includes("id=eq") ? [row()] : body), text: async () => "" };
+  };
+  const store = new SupabaseStore({ url: "https://x.supabase.co", key: "sb_secret_test", fetchImpl: fakeFetch });
+  const queue = new ApprovalQueue(store);
+
+  const created = await queue.propose({ action: "send_sms", summary: "SMS to c1", payload: { contactId: "c1" } });
+  assert.equal(created.status, "pending");
+  assert.equal(requests[0].url, "https://x.supabase.co/rest/v1/approvals");
+  assert.equal(requests[0].init.headers.apikey, "sb_secret_test");
+
+  const rejected = await queue.decide(created.id, "reject");
+  assert.equal(rejected.status, "rejected");
+  assert.equal(requests.at(-1).init.method, "PATCH");
 });
 
 test("executor refuses unknown actions", async () => {
@@ -179,7 +204,7 @@ test("agent runs a tool call then returns the final answer", async () => {
     return jsonResponse({ stop_reason: "end_turn", content: [{ type: "text", text: "No orders yet." }] });
   };
   const connectors = createConnectors({}, fakeFetch);
-  const tools = buildTools({ connectors, approvals: new ApprovalQueue(join(mkdtempSync(join(tmpdir(), "j-")), "a.json")) });
+  const tools = buildTools({ connectors, approvals: new ApprovalQueue(new FileStore(tmpFile())) });
   const agent = createAgent({ apiKey: "k", model: "claude-sonnet-5-5", tools, fetchImpl: fakeFetch });
 
   const result = await agent.respond([], "any orders?");

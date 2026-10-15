@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
-import { ApprovalQueue } from "./approvals.js";
+import { ApprovalQueue, FileStore, SupabaseStore } from "./approvals.js";
 import { createConnectors } from "./connectors.js";
 import { buildTools, executorFor } from "./tools.js";
 import { createAgent } from "./agent.js";
@@ -18,8 +18,13 @@ export function createApp(env = process.env, deps = {}) {
     throw new Error("AGENT_TOKEN must be set and at least 16 characters. Refusing to start without it.");
   }
 
-  const defaultApprovals = env.VERCEL ? "/tmp/approvals.json" : join(here, "..", "data", "approvals.json");
-  const approvals = deps.approvals ?? new ApprovalQueue(env.APPROVALS_FILE ?? defaultApprovals);
+  const approvals =
+    deps.approvals ??
+    new ApprovalQueue(
+      env.SUPABASE_URL && env.SUPABASE_SECRET_KEY
+        ? new SupabaseStore({ url: env.SUPABASE_URL, key: env.SUPABASE_SECRET_KEY })
+        : new FileStore(env.APPROVALS_FILE ?? (env.VERCEL ? "/tmp/approvals.json" : join(here, "..", "data", "approvals.json"))),
+    );
   const connectors = deps.connectors ?? createConnectors(env);
   const tools = buildTools({ connectors, approvals });
   const missingKeyAgent = {
@@ -94,7 +99,7 @@ export function createApp(env = process.env, deps = {}) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/approvals") {
-        return send(res, 200, { items: approvals.list(url.searchParams.get("status") ?? undefined) });
+        return send(res, 200, { items: await approvals.list(url.searchParams.get("status") ?? undefined) });
       }
 
       const match = url.pathname.match(/^\/api\/approvals\/([^/]+)\/(approve|reject)$/);
