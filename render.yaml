@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: jarvis
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    disk:
+      name: jarvis-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: AGENT_TOKEN
+        generateValue: true
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-5-5
+      - key: GHL_API_KEY
+        sync: false
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false
+      - key: SHOPIFY_ACCESS_TOKEN
+        sync: false
+      - key: SHOPIFY_STORE_DOMAIN
+        sync: false
+      - key: SOCIAL_API_KEY
+        sync: false
