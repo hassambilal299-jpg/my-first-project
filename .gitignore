@@ -1,0 +1,5 @@
+# Third-party clone of https://github.com/ethanplusai/harvey (MIT).
+# Not vendored into this repo — clone it locally instead:
+#   git clone https://github.com/ethanplusai/harvey.git
+# Pinned reference: v0.3.0-18-ge114e95 (e114e95471b1bf155454fca108f0730b66a47a01)
+harvey/
