@@ -221,6 +221,10 @@ export function executorFor({ directory, connectorsFor, defaultConnectors }) {
         return connectors.sendSms(item.payload);
       case "publish_post":
         return connectors.publishPost(item.payload);
+      case "local_task":
+        // Nothing to run here: this one happens on the user's own laptop.
+        // Approving it puts it in the queue the local agent polls.
+        return { queued: true, note: "Waiting for your laptop to pick this up." };
       default:
         throw new Error(`No executor for action ${item.action}`);
     }

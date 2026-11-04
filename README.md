@@ -68,6 +68,7 @@ The app is split so that **the expensive part is optional**.
 | `note acme client called about pricing` | Records something into the history |
 | `emails`, `orders for acme` | Read straight from the connector |
 | `businesses`, `add business acme`, `status` | Manage and inspect |
+| `on my laptop backup`, `laptop results` | Run something on your own machine (see below) |
 
 None of that calls a model. Dictated texts and posts use **your** words, so no
 generation is needed — and they still go through the approval gate.
@@ -98,6 +99,56 @@ Two modes, and it degrades rather than breaking:
   server-side and any failure silently falls back to the browser voice.
 
 Speech recognition (listening) is always the browser's, which is free.
+
+## Your laptop
+
+The server runs in a datacenter and **cannot** reach your machine — browsers and
+cloud functions are sandboxed from it by design. So the laptop half runs on the
+laptop: `agent/local-agent.mjs`, a small program you start yourself.
+
+```
+laptop                            cloud
+------                            -----
+local-agent  --- polls --->       GET  /api/tasks      what did I approve?
+local-agent  --- posts --->       POST /api/tasks/:id  here is what happened
+```
+
+It only ever calls **out**, so there is no port to open, no firewall change, and
+nothing on the internet can reach your laptop. Setup:
+
+```bash
+cp agent/jarvis-agent.config.example.json ~/jarvis-agent.config.json
+# edit it: paste your token, list what it may run
+node agent/local-agent.mjs ~/jarvis-agent.config.json
+```
+
+Then say `on my laptop backup`, approve it, and the agent runs it. `laptop
+results` reads back what happened. Results are recorded as events, so they show
+up in briefs alongside everything else.
+
+### Why it is an allowlist and not "all access"
+
+An always-on agent that could run **anything**, driven from a public URL, means
+one leaked token equals total control of the machine — and this is the machine
+holding your clients' credentials. So the agent runs only the named entries in
+its own config file:
+
+```json
+"allow": {
+  "backup":   { "run": "/Users/you/scripts/backup.sh" },
+  "invoices": { "run": "ls", "args": ["-la"], "cwd": "/Users/you/Documents/Invoices" },
+  "open":     { "run": "open", "argsAllowed": true }
+}
+```
+
+- The task names **which entry** to use, never which program to run. Asking for
+  `rm` or `bash` is simply not in the list.
+- Arguments are rejected unless that entry sets `argsAllowed`, and are passed as
+  argv, never through a shell, so quoting cannot escape into a second command.
+- Every task still goes through the approval gate before the laptop sees it.
+
+The config is yours — widen it as far as you want. The point is that *you* decide
+in a file on your machine, not whoever is holding a token.
 
 ## Environment variables
 
@@ -130,7 +181,7 @@ better than a brief full of invented activity.
 ```bash
 cp .env.example .env     # fill in AGENT_TOKEN and ANTHROPIC_API_KEY
 npm start                # http://localhost:3000
-npm test                 # 76 tests, no network needed
+npm test                 # 84 tests, no network needed
 npm run build:ui         # after editing public/index.html
 ```
 

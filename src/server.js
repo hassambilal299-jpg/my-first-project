@@ -222,6 +222,44 @@ export function createApp(env = process.env, deps = {}) {
         return send(res, 200, await syncAll({ directory, connectorsFor }));
       }
 
+      // ----- the laptop agent's two endpoints -----
+      // Approved laptop tasks that have not run yet. The agent polls this.
+      if (req.method === "GET" && url.pathname === "/api/tasks") {
+        const approved = await approvals.list("approved");
+        const tasks = approved
+          .filter((i) => i.action === "local_task" && i.result?.queued && !i.result?.ran)
+          .map((i) => ({ id: i.id, command: i.payload.command, args: i.payload.args ?? [] }));
+        return send(res, 200, { tasks });
+      }
+
+      // What the laptop did. Recorded against the business so it shows in briefs.
+      const taskResult = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
+      if (req.method === "POST" && taskResult) {
+        const [, id] = taskResult;
+        const { ok, output, refused } = await readJson(req);
+        const item = await approvals.get(id);
+        if (!item) return send(res, 404, { error: `No task ${id}` });
+        if (item.action !== "local_task") return send(res, 400, { error: "Not a laptop task" });
+
+        await approvals.store.call("approvals.update", {
+          id,
+          patch: { result: { ...item.result, ran: true, ok: Boolean(ok), refused: Boolean(refused), output: String(output ?? "").slice(0, 4000) } },
+        });
+
+        if (item.businessId) {
+          await directory
+            .record({
+              businessId: item.businessId,
+              source: "laptop",
+              kind: ok ? "local_task.done" : "local_task.failed",
+              summary: `${item.payload.command} on the laptop: ${ok ? "done" : refused ? "refused" : "failed"}`,
+              detail: { output: String(output ?? "").slice(0, 1000) },
+            })
+            .catch(() => {});
+        }
+        return send(res, 200, { ok: true });
+      }
+
       if (req.method === "GET" && url.pathname === "/api/approvals") {
         const business = url.searchParams.get("business");
         const resolved = business ? await directory.resolve(business) : null;

@@ -15,6 +15,7 @@ import { createAgent } from "../src/agent.js";
 import { syncBusiness, syncAll } from "../src/sync.js";
 import { runCommand, suggest, parseWindow } from "../src/commands.js";
 import { createVoice, MAX_SPEECH_CHARS } from "../src/voice.js";
+import { planCommand, pollOnce } from "../agent/local-agent.mjs";
 
 const TOKEN = "test-token-1234567890";
 const KEY = "a".repeat(64);
@@ -947,6 +948,175 @@ test("the default model is the cheapest one unless overridden", async () => {
   } finally {
     server.close();
   }
+});
+
+// ----------------------------------------------------------- laptop agent ---
+
+test("the laptop agent only runs what its own allow list permits", () => {
+  const allow = {
+    disk: { run: "df", args: ["-h"] },
+    open: { run: "open", argsAllowed: true },
+  };
+
+  assert.deepEqual(planCommand(allow, { command: "disk" }), { file: "df", args: ["-h"], cwd: undefined });
+
+  // Not listed at all.
+  assert.match(planCommand(allow, { command: "rm" }).refused, /not in this laptop's allow list/);
+  assert.match(planCommand(allow, { command: "" }).refused, /not in this laptop's allow list/);
+
+  // Listed, but arguments are not permitted for it.
+  assert.match(planCommand(allow, { command: "disk", args: ["/"] }).refused, /does not accept arguments/);
+
+  // Permitted arguments are appended after the fixed ones.
+  assert.deepEqual(planCommand(allow, { command: "open", args: ["notes.txt"] }), {
+    file: "open",
+    args: ["notes.txt"],
+    cwd: undefined,
+  });
+
+  // Path climbing is refused even though args go through argv, never a shell.
+  assert.match(planCommand(allow, { command: "open", args: ["../../etc/passwd"] }).refused, /not allowed/);
+});
+
+test("the laptop agent cannot be told which program to run", () => {
+  const allow = { disk: { run: "df", args: ["-h"] } };
+  // A task naming a binary directly is simply not in the list.
+  for (const command of ["/bin/sh", "bash", "curl", "df"]) {
+    const plan = planCommand(allow, { command });
+    if (command === "df") continue;
+    assert.ok(plan.refused, `${command} must be refused`);
+  }
+});
+
+test("a laptop task is queued, approved, picked up, and reported back", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+  const { server } = createApp({ AGENT_TOKEN: TOKEN }, { ...w, agent: { respond: async () => ({ text: "" }) } });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    // Asking queues it. Nothing runs.
+    const asked = await runCommand("on my laptop backup", deps);
+    assert.equal(asked.command, "laptop_task");
+    assert.match(asked.text, /Queued for your laptop, not run yet/);
+
+    // Before approval the laptop sees nothing.
+    let tasks = (await (await fetch(`${base}/api/tasks`, { headers: auth })).json()).tasks;
+    assert.equal(tasks.length, 0, "an unapproved task must not reach the laptop");
+
+    // Approve, and now it is offered.
+    await runCommand("approve 1", deps);
+    tasks = (await (await fetch(`${base}/api/tasks`, { headers: auth })).json()).tasks;
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].command, "backup");
+
+    // The laptop reports what happened.
+    const reported = await fetch(`${base}/api/tasks/${tasks[0].id}`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ ok: true, output: "backed up 42 files" }),
+    });
+    assert.equal(reported.status, 200);
+
+    // It is not offered twice.
+    tasks = (await (await fetch(`${base}/api/tasks`, { headers: auth })).json()).tasks;
+    assert.equal(tasks.length, 0, "a finished task must not be handed out again");
+
+    const results = await runCommand("laptop results", deps);
+    assert.match(results.text, /backup: done/);
+    assert.match(results.text, /backed up 42 files/);
+  } finally {
+    server.close();
+  }
+});
+
+test("reading laptop results is never mistaken for queueing a task", async () => {
+  const w = wiring();
+  const deps = cmdDeps(w);
+
+  for (const phrase of ["laptop results", "laptop output", "computer status", "laptop history"]) {
+    const out = await runCommand(phrase, deps);
+    assert.equal(out?.command, "laptop_results", `"${phrase}" must read, not queue`);
+  }
+  assert.equal((await w.approvals.list("pending")).length, 0, "reading must queue nothing");
+
+  // Queuing still needs an explicit phrasing.
+  assert.equal((await runCommand("on my laptop backup", deps)).command, "laptop_task");
+  assert.equal((await runCommand("run backup", deps)).command, "laptop_task");
+});
+
+test("the laptop endpoints need the token", async () => {
+  const w = wiring();
+  const { server } = createApp({ AGENT_TOKEN: TOKEN }, { ...w, agent: { respond: async () => ({ text: "" }) } });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    assert.equal((await fetch(`${base}/api/tasks`)).status, 401);
+    assert.equal((await fetch(`${base}/api/tasks/abc`, { method: "POST", body: "{}" })).status, 401);
+  } finally {
+    server.close();
+  }
+});
+
+test("reporting against an unknown or wrong-kind task is refused", async () => {
+  const w = wiring();
+  const { server } = createApp({ AGENT_TOKEN: TOKEN }, { ...w, agent: { respond: async () => ({ text: "" }) } });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const missing = await fetch(`${base}/api/tasks/nope`, { method: "POST", headers: auth, body: JSON.stringify({ ok: true }) });
+    assert.equal(missing.status, 404);
+
+    const sms = await w.approvals.propose({ action: "send_sms", summary: "x", payload: {} });
+    const wrong = await fetch(`${base}/api/tasks/${sms.id}`, { method: "POST", headers: auth, body: JSON.stringify({ ok: true }) });
+    assert.equal(wrong.status, 400);
+  } finally {
+    server.close();
+  }
+});
+
+test("the agent runs approved tasks and posts results back", async () => {
+  const calls = [];
+  const config = {
+    server: "https://jarvis.example",
+    token: "t",
+    pollSeconds: 10,
+    allow: { uptime: { run: "node", args: ["-e", "console.log('up 3 days')"] } },
+  };
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (url.endsWith("/api/tasks")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ tasks: [{ id: "t1", command: "uptime", args: [] }] }) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+  };
+
+  const out = await pollOnce(config, fetchImpl, () => {});
+  assert.equal(out.ran, 1);
+
+  const posted = JSON.parse(calls.at(-1).init.body);
+  assert.equal(posted.ok, true);
+  assert.match(posted.output, /up 3 days/);
+  assert.match(calls.at(-1).url, /\/api\/tasks\/t1$/);
+});
+
+test("the agent reports a refusal rather than running something unlisted", async () => {
+  const config = { server: "https://x", token: "t", pollSeconds: 10, allow: { uptime: { run: "true" } } };
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (url.endsWith("/api/tasks")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ tasks: [{ id: "t9", command: "rm", args: ["-rf", "/"] }] }) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+  };
+
+  await pollOnce(config, fetchImpl, () => {});
+  const posted = JSON.parse(calls.at(-1).init.body);
+  assert.equal(posted.ok, false);
+  assert.equal(posted.refused, true);
+  assert.match(posted.output, /not in this laptop's allow list/);
 });
 
 // ------------------------------------------------------------------ voice ---

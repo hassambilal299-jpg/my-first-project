@@ -1,0 +1,15 @@
+{
+  "server": "https://jarvis-hb-designers.vercel.app",
+  "token": "paste the same token you type into the Jarvis page",
+  "pollSeconds": 10,
+
+  "//": "Only these can run. Each key is the name you say to Jarvis.",
+  "//argsAllowed": "false (the default) means fixed arguments only - safest.",
+  "allow": {
+    "disk": { "run": "df", "args": ["-h"] },
+    "uptime": { "run": "uptime" },
+    "backup": { "run": "/Users/you/scripts/backup.sh" },
+    "open": { "run": "open", "argsAllowed": true },
+    "invoices": { "run": "ls", "args": ["-la"], "cwd": "/Users/you/Documents/Invoices" }
+  }
+}

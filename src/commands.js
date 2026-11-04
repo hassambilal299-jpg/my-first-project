@@ -20,6 +20,7 @@ export const HELP = [
   'Look around: "businesses", "pending", "status", "emails", "orders for acme".',
   'Act: "text c1 saying running ten minutes late",',
   '"post to linkedin saying we are hiring", "approve 1", "reject 2", "sync".',
+  'On your own machine: "on my laptop backup", then "laptop results".',
 ].join(" ");
 
 const EXAMPLES = [
@@ -37,6 +38,8 @@ const EXAMPLES = [
   "emails",
   "orders for acme",
   "status",
+  "on my laptop backup",
+  "laptop results",
   "help",
 ];
 
@@ -290,6 +293,40 @@ const RULES = [
       let text = `Drafted, not published. ${item.summary}. Say "approve 1" to publish.`;
       if (unknown.length) text += ` I skipped ${unknown.join(", ")}.`;
       return { text };
+    },
+  },
+  {
+    name: "laptop_results",
+    match: /^\s*(?:laptop|computer)\s+(?:results?|output|status|history)\s*\??\s*$/i,
+    run: async ({ approvals }) => {
+      const done = (await approvals.list("approved")).filter(
+        (i) => i.action === "local_task" && i.result?.ran,
+      );
+      if (!done.length) return { text: "Your laptop has not run anything yet." };
+      const recent = done.slice(-3).map((i) => {
+        const head = String(i.result.output ?? "").split("\n")[0].slice(0, 120);
+        return `${i.payload.command}: ${i.result.ok ? "done" : i.result.refused ? "refused" : "failed"}${head ? `, ${head}` : ""}`;
+      });
+      return { text: `Last ${recent.length} on your laptop. ${recent.join(". ")}.` };
+    },
+  },
+  {
+    name: "laptop_task",
+    // Runs on the user's own machine via the local agent, and only if the
+    // agent's own allow list permits it. Queued, never immediate.
+    match: /^\s*(?:on (?:my )?(?:laptop|computer|mac|pc)\s*,?\s+(?:run\s+)?|run\s+)([a-z0-9_-]+)((?:\s+\S+)*)\s*$/i,
+    run: async ({ directory, approvals }, m) => {
+      const command = m[1].toLowerCase();
+      const args = (m[2] ?? "").trim().split(/\s+/).filter(Boolean);
+      const item = await approvals.propose({
+        action: "local_task",
+        businessId: null,
+        summary: `On your laptop: ${command}${args.length ? ` ${args.join(" ")}` : ""}`,
+        payload: { command, args },
+      });
+      return {
+        text: `Queued for your laptop, not run yet. ${item.summary}. Say "approve 1", then your laptop agent picks it up. If the agent is not running, nothing happens.`,
+      };
     },
   },
   {
