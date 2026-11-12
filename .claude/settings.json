@@ -1,0 +1,19 @@
+{
+  "$schema": "https://code.claude.com/schemas/settings.json",
+  "skills": {
+    "anthropic-skills:docs": {},
+    "anthropic-skills:computer-use": {},
+    "anthropic-skills:chrome-browser": {},
+    "anthropic-skills:built-in-browser": {},
+    "anthropic-skills:deep-research": {},
+    "anthropic-skills:import-memory": {},
+    "anthropic-skills:morning": {},
+    "anthropic-skills:pdf": {},
+    "anthropic-skills:pptx": {},
+    "anthropic-skills:docx": {},
+    "anthropic-skills:xlsx": {},
+    "anthropic-skills:google-workspace": {},
+    "anthropic-skills:skill-creator": {},
+    "anthropic-skills:ui-ux-pro-max": {}
+  }
+}
