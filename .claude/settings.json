@@ -20,6 +20,18 @@
     "composio": {
       "command": "npx",
       "args": ["-y", "@composio/cli@latest", "mcp"]
+    },
+    "ponytail": {
+      "command": "npx",
+      "args": ["-y", "ponytail@latest", "mcp"]
+    },
+    "graphify": {
+      "command": "npx",
+      "args": ["-y", "graphify@latest", "mcp"]
+    },
+    "omniroute": {
+      "command": "npx",
+      "args": ["-y", "omniroute@latest", "mcp"]
     }
   }
 }
