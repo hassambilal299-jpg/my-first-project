@@ -15,5 +15,11 @@
     "anthropic-skills:google-workspace": {},
     "anthropic-skills:skill-creator": {},
     "anthropic-skills:ui-ux-pro-max": {}
+  },
+  "mcpServers": {
+    "composio": {
+      "command": "npx",
+      "args": ["-y", "@composio/cli@latest", "mcp"]
+    }
   }
 }

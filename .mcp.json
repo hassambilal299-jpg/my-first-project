@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json.schemastore.org/mcp.json",
+  "mcpServers": {
+    "composio": {
+      "command": "npx",
+      "args": ["-y", "@composio/cli@latest", "mcp"]
+    }
+  }
+}
