@@ -16,6 +16,10 @@
     "omniroute": {
       "command": "npx",
       "args": ["-y", "omniroute@latest", "mcp"]
+    },
+    "reverse-engineer": {
+      "command": "node",
+      "args": ["./.claude/reverse-engineer.js"]
     }
   }
 }
