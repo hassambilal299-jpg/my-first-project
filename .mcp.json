@@ -20,6 +20,10 @@
     "reverse-engineer": {
       "command": "node",
       "args": ["./.claude/reverse-engineer.js"]
+    },
+    "agentreach": {
+      "command": "npx",
+      "args": ["-y", "agentreach@latest", "mcp"]
     }
   }
 }
